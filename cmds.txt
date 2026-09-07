@@ -1,0 +1,4 @@
+get method =====  curl -X GET "http://127.0.0.1:8000/api/students"
+post method ====== curl -X POST "http://127.0.0.1:8000/api/students" -H "Content-Type: application/json" -d "{\"name\":\"Rahul Kumar\",\"roll_number\":\"23A91A0502\",\"role\":\"admin\"}"
+venv\Scripts\activate
+python.exe -m uvicorn server:app --reload --reload-exclude "venv/*" --reload-exclude ".venv/*" --reload-exclude "__pycache__/*"
