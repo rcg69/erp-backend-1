@@ -6,6 +6,6 @@ class UserRecord(BaseModel):
     username: str
     email: EmailStr
     password_hash: str
-    person_id: int | None = None
+    person_id: int
     role_id: int
     is_active: bool = True

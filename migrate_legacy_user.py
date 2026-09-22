@@ -1,7 +1,9 @@
 import getpass
 import sys
 
-from database import supabase_admin
+from sqlalchemy import text
+
+from database import SessionLocal
 from service.password_service import hash_password
 
 
@@ -9,23 +11,31 @@ def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit("Usage: python migrate_legacy_user.py EMAIL")
 
-    email = sys.argv[1]
+    email = sys.argv[1].strip().lower()
     password = getpass.getpass("New password: ")
-    response = (
-        supabase_admin.table("users")
-        .select("id, email")
-        .eq("email", email)
-        .maybe_single()
-        .execute()
-    )
-    if not response.data:
-        raise SystemExit("User not found")
+    db = SessionLocal()
+    try:
+        user = db.execute(
+            text("SELECT id FROM users WHERE email = :email LIMIT 1"),
+            {"email": email},
+        ).mappings().first()
+        if not user:
+            raise SystemExit("User not found")
 
-    supabase_admin.table("users").update({
-        "password_hash": hash_password(password),
-        "is_active": True,
-    }).eq("id", response.data["id"]).execute()
-    print("User password migrated successfully")
+        db.execute(
+            text(
+                """
+                UPDATE users
+                SET password_hash = :password_hash, is_active = TRUE
+                WHERE id = :user_id
+                """
+            ),
+            {"password_hash": hash_password(password), "user_id": user["id"]},
+        )
+        db.commit()
+        print("User password migrated successfully")
+    finally:
+        db.close()
 
 
 if __name__ == "__main__":

@@ -12,3 +12,9 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str
     user: dict
+
+
+class RefreshResponse(BaseModel):
+    access_token: str
+    token_type: str
+    expires_in: int
