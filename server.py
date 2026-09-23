@@ -1,11 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import ensure_auth_tables
+from api.auth_api import router as auth_router
+from api.grade_api import router as grade_router
+from api.roles_api import router as roles_router
+from api.sections_api import router as sections_router
+from api.staff_api import router as staff_router
 from api.student_api import router as student_router
 from api.user_create_api import router as user_create_router
-from api.auth_api import router as auth_router
-from api.roles_api import router as roles_router
+from database import ensure_database_schema
+
 app = FastAPI(
     title="Student ERP API"
 )
@@ -13,7 +17,7 @@ app = FastAPI(
 
 @app.on_event("startup")
 def initialize_database():
-    ensure_auth_tables()
+    ensure_database_schema()
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,8 +35,10 @@ def health():
         "message": "API is running"
     }
 
-
+app.include_router(grade_router)
+app.include_router(sections_router)
 app.include_router(student_router)
+app.include_router(staff_router)
 app.include_router(user_create_router)
 app.include_router(auth_router)
 app.include_router(roles_router)

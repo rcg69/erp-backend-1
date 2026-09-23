@@ -3,23 +3,26 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from database import get_db
-from schemas.student_schema import StudentCreate
+from schemas.student_schema import StudentCreate, StudentUpdate
 from security.auth import get_current_user, require_admin
 
 
 router = APIRouter(prefix="/api/students", tags=["Students/Staff"])
 
 
-STUDENT_COLUMNS = "id, name, roll_number, admission_date, parent_name, mobile_number, status, created_at"
+STUDENT_COLUMNS = "id, name, roll_number, admission_date, parent_name, mobile_number, grade, section, status, created_at"
 
 
-def _student_payload(student: StudentCreate) -> dict:
+def _student_payload(student: StudentCreate | StudentUpdate) -> dict:
     return {
         "name": student.name,
         "roll_number": student.roll_number,
         "admission_date": student.admission_date,
         "parent_name": student.parent_name,
         "mobile_number": student.mobile_number,
+        "grade": student.grade,
+        "section": student.section,
+        "status": getattr(student, "status", None),
     }
 
 
@@ -33,8 +36,8 @@ def create_student(
         created = db.execute(
             text(
                 f"""
-                INSERT INTO students (name, roll_number, admission_date, parent_name, mobile_number)
-                VALUES (:name, :roll_number, :admission_date, :parent_name, :mobile_number)
+                INSERT INTO students (name, roll_number, admission_date, parent_name, mobile_number, grade, section, status)
+                VALUES (:name, :roll_number, :admission_date, :parent_name, :mobile_number, :grade, :section, :status)
                 RETURNING {STUDENT_COLUMNS}
                 """
             ),
@@ -90,23 +93,32 @@ def get_student(
 @router.put("/{student_id}")
 def update_student(
     student_id: int,
-    student: StudentCreate,
+    student: StudentUpdate,
     _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
+    payload = _student_payload(student)
+    update_fields = []
+
+    for field_name in ["name", "roll_number", "admission_date", "parent_name", "mobile_number", "grade", "section", "status"]:
+        value = payload[field_name]
+        if value is not None:
+            update_fields.append(f"{field_name} = :{field_name}")
+
+    if not update_fields:
+        raise HTTPException(status_code=400, detail="No student fields were provided for update")
+
     try:
         updated = db.execute(
             text(
                 f"""
                 UPDATE students
-                SET name = :name, roll_number = :roll_number,
-                    admission_date = :admission_date,
-                    parent_name = :parent_name, mobile_number = :mobile_number
+                SET {', '.join(update_fields)}
                 WHERE id = :student_id
                 RETURNING {STUDENT_COLUMNS}
                 """
             ),
-            {**_student_payload(student), "student_id": student_id},
+            {**payload, "student_id": student_id},
         ).mappings().first()
         db.commit()
         if not updated:
