@@ -14,15 +14,17 @@ def create_grade(grade_data: GradeCreate, db: Session = Depends(get_db)):
         record = db.execute(
             text(
                 """
-                INSERT INTO grades (academic_year, grade, status)
-                VALUES (:academic_year, :grade, :status)
+                INSERT INTO grades (academic_year, grade, section_id, staff_id, status)
+                VALUES (:academic_year, :grade, :section_id, :staff_id, :status)
                 ON CONFLICT (academic_year, grade) DO NOTHING
-                RETURNING id, academic_year, grade, status
+                RETURNING id, academic_year, grade, section_id, staff_id, status
                 """
             ),
             {
                 "academic_year": grade_data.academic_year,
                 "grade": grade_data.grade,
+                "section_id": grade_data.section_id,
+                "staff_id": grade_data.staff_id,
                 "status": grade_data.status or "active",
             },
         ).mappings().first()
@@ -44,7 +46,7 @@ def create_grade(grade_data: GradeCreate, db: Session = Depends(get_db)):
 def get_grades(db: Session = Depends(get_db)):
     try:
         rows = db.execute(
-            text("SELECT id, academic_year, grade, status FROM grades ORDER BY academic_year, grade")
+            text("SELECT id, academic_year, grade, section_id, staff_id, status FROM grades ORDER BY academic_year, grade")
         ).mappings().all()
         return [dict(row) for row in rows]
     except Exception as exc:
@@ -54,7 +56,7 @@ def get_grades(db: Session = Depends(get_db)):
 @router.get("/{grade_id}", response_model=GradeResponse)
 def get_grade(grade_id: int, db: Session = Depends(get_db)):
     row = db.execute(
-        text("SELECT id, academic_year, grade, status FROM grades WHERE id = :grade_id"),
+        text("SELECT id, academic_year, grade, section_id, staff_id, status FROM grades WHERE id = :grade_id"),
         {"grade_id": grade_id},
     ).mappings().first()
 
@@ -69,12 +71,14 @@ def update_grade(grade_id: int, grade_data: GradeUpdate, db: Session = Depends(g
     payload = {
         "academic_year": grade_data.academic_year,
         "grade": grade_data.grade,
+        "section_id": grade_data.section_id,
+        "staff_id": grade_data.staff_id,
         "status": grade_data.status,
         "grade_id": grade_id,
     }
 
     set_clauses = []
-    for field_name in ["academic_year", "grade", "status"]:
+    for field_name in ["academic_year", "grade", "section_id", "staff_id", "status"]:
         value = payload[field_name]
         if value is not None:
             set_clauses.append(f"{field_name} = :{field_name}")
@@ -89,7 +93,7 @@ def update_grade(grade_id: int, grade_data: GradeUpdate, db: Session = Depends(g
                 UPDATE grades
                 SET {', '.join(set_clauses)}
                 WHERE id = :grade_id
-                RETURNING id, academic_year, grade, status
+                RETURNING id, academic_year, grade, section_id, staff_id, status
                 """
             ),
             payload,
@@ -112,7 +116,7 @@ def update_grade(grade_id: int, grade_data: GradeUpdate, db: Session = Depends(g
 def delete_grade(grade_id: int, db: Session = Depends(get_db)):
     try:
         row = db.execute(
-            text("DELETE FROM grades WHERE id = :grade_id RETURNING id, academic_year, grade, status"),
+            text("DELETE FROM grades WHERE id = :grade_id RETURNING id, academic_year, grade, section_id, staff_id, status"),
             {"grade_id": grade_id},
         ).mappings().first()
         db.commit()

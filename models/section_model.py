@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, UniqueConstraint
+from sqlalchemy import Column, ForeignKey, Integer, String, UniqueConstraint
 
 from database import Base
 
@@ -9,6 +9,8 @@ class Grade(Base):
     id = Column(Integer, primary_key=True, index=True)
     academic_year = Column(String(20), nullable=False)
     grade = Column(String(20), nullable=False)
+    section_id = Column(Integer, ForeignKey("sections.id"), nullable=True)
+    staff_id = Column(Integer, nullable=True)
     status = Column(String(20), nullable=False, default="active")
 
     __table_args__ = (
@@ -21,4 +23,3 @@ class Section(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     section = Column(String(10), nullable=False, unique=True)
-    staff_id = Column(Integer, nullable=True)

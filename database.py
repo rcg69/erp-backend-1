@@ -93,6 +93,8 @@ def ensure_database_schema() -> None:
                     id SERIAL PRIMARY KEY,
                     academic_year VARCHAR(20) NOT NULL,
                     grade VARCHAR(20) NOT NULL,
+                    section_id INTEGER NULL,
+                    staff_id INTEGER NULL,
                     status VARCHAR(20) NOT NULL DEFAULT 'active',
                     CONSTRAINT uq_academic_year_grade UNIQUE (academic_year, grade)
                 )
@@ -100,13 +102,41 @@ def ensure_database_schema() -> None:
             )
         )
 
+        connection.execute(
+            text(
+                """
+                ALTER TABLE grades
+                ADD COLUMN IF NOT EXISTS section_id INTEGER
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                ALTER TABLE grades
+                ADD COLUMN IF NOT EXISTS staff_id INTEGER
+                """
+            )
+        )
+
+        if "sections" in existing_tables:
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE sections
+                    DROP COLUMN IF EXISTS staff_id
+                    """
+                )
+            )
+
         if "sections" in existing_tables and {"grade", "academic_year"}.issubset(legacy_section_columns):
             connection.execute(
                 text(
                     """
-                    INSERT INTO grades (academic_year, grade, status)
-                    SELECT DISTINCT academic_year, grade, 'active'
-                    FROM sections
+                    INSERT INTO grades (academic_year, grade, section_id, staff_id, status)
+                    SELECT DISTINCT s.academic_year, s.grade, NULL, CAST(NULL AS INTEGER), 'active'
+                    FROM sections s
                     ON CONFLICT (academic_year, grade) DO NOTHING
                     """
                 )
@@ -117,8 +147,7 @@ def ensure_database_schema() -> None:
                     """
                     CREATE TABLE IF NOT EXISTS sections_new (
                         id SERIAL PRIMARY KEY,
-                        section VARCHAR(10) NOT NULL UNIQUE,
-                        staff_id INTEGER NULL
+                        section VARCHAR(10) NOT NULL UNIQUE
                     )
                     """
                 )
@@ -127,8 +156,8 @@ def ensure_database_schema() -> None:
             connection.execute(
                 text(
                     """
-                    INSERT INTO sections_new (section, staff_id)
-                    SELECT DISTINCT section, CAST(NULL AS INTEGER)
+                    INSERT INTO sections_new (section)
+                    SELECT DISTINCT section
                     FROM sections
                     ON CONFLICT (section) DO NOTHING
                     """
@@ -143,8 +172,7 @@ def ensure_database_schema() -> None:
                     """
                     CREATE TABLE IF NOT EXISTS sections (
                         id SERIAL PRIMARY KEY,
-                        section VARCHAR(10) NOT NULL UNIQUE,
-                        staff_id INTEGER NULL
+                        section VARCHAR(10) NOT NULL UNIQUE
                     )
                     """
                 )

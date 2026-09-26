@@ -14,13 +14,13 @@ def create_section(section_data: SectionCreate, db: Session = Depends(get_db)):
         created = db.execute(
             text(
                 """
-                INSERT INTO sections (section, staff_id)
-                VALUES (:section, :staff_id)
+                INSERT INTO sections (section)
+                VALUES (:section)
                 ON CONFLICT (section) DO NOTHING
-                RETURNING id, section, staff_id
+                RETURNING id, section
                 """
             ),
-            {"section": section_data.section, "staff_id": section_data.staff_id},
+            {"section": section_data.section},
         ).mappings().first()
         db.commit()
 
@@ -40,7 +40,7 @@ def create_section(section_data: SectionCreate, db: Session = Depends(get_db)):
 def get_sections(db: Session = Depends(get_db)):
     try:
         rows = db.execute(
-            text("SELECT id, section, staff_id FROM sections ORDER BY section")
+            text("SELECT id, section FROM sections ORDER BY section")
         ).mappings().all()
         return [dict(row) for row in rows]
     except Exception as exc:
@@ -50,7 +50,7 @@ def get_sections(db: Session = Depends(get_db)):
 @router.get("/{section_id}", response_model=SectionResponse)
 def get_section(section_id: int, db: Session = Depends(get_db)):
     row = db.execute(
-        text("SELECT id, section, staff_id FROM sections WHERE id = :section_id"),
+        text("SELECT id, section FROM sections WHERE id = :section_id"),
         {"section_id": section_id},
     ).mappings().first()
 
@@ -62,10 +62,10 @@ def get_section(section_id: int, db: Session = Depends(get_db)):
 
 @router.put("/{section_id}", response_model=SectionResponse)
 def update_section(section_id: int, section_data: SectionUpdate, db: Session = Depends(get_db)):
-    payload = {"section": section_data.section, "staff_id": section_data.staff_id, "section_id": section_id}
+    payload = {"section": section_data.section, "section_id": section_id}
     set_clauses = []
 
-    for field_name in ["section", "staff_id"]:
+    for field_name in ["section"]:
         value = payload[field_name]
         if value is not None:
             set_clauses.append(f"{field_name} = :{field_name}")
@@ -80,7 +80,7 @@ def update_section(section_id: int, section_data: SectionUpdate, db: Session = D
                 UPDATE sections
                 SET {', '.join(set_clauses)}
                 WHERE id = :section_id
-                RETURNING id, section, staff_id
+                RETURNING id, section
                 """
             ),
             payload,
@@ -103,7 +103,7 @@ def update_section(section_id: int, section_data: SectionUpdate, db: Session = D
 def delete_section(section_id: int, db: Session = Depends(get_db)):
     try:
         row = db.execute(
-            text("DELETE FROM sections WHERE id = :section_id RETURNING id, section, staff_id"),
+            text("DELETE FROM sections WHERE id = :section_id RETURNING id, section"),
             {"section_id": section_id},
         ).mappings().first()
         db.commit()

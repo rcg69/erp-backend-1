@@ -21,8 +21,9 @@ class DatabaseBootstrapTests(unittest.TestCase):
         section_columns = {column["name"] for column in inspector.get_columns("sections")}
         student_columns = {column["name"] for column in inspector.get_columns("students")}
 
-        self.assertTrue({"academic_year", "grade", "status"}.issubset(grade_columns))
-        self.assertTrue({"section", "staff_id"}.issubset(section_columns))
+        self.assertTrue({"academic_year", "grade", "status", "section_id", "staff_id"}.issubset(grade_columns))
+        self.assertTrue({"section"}.issubset(section_columns))
+        self.assertFalse("staff_id" in section_columns)
         self.assertTrue({"grade", "section"}.issubset(student_columns))
 
     def test_database_bootstrap_creates_staff_table(self):
