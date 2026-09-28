@@ -1,9 +1,9 @@
 from sqlalchemy import (
+    Boolean,
     Column,
+    Date,
     ForeignKey,
     Integer,
-    Date,
-    Boolean,
     Text,
     UniqueConstraint,
 )
@@ -24,6 +24,22 @@ class ClassSession(Base):
     timetable_id = Column(
         Integer,
         ForeignKey("timetables.id"),
+        nullable=False,
+        index=True,
+    )
+
+    # Subject actually taught in this session
+    subject_id = Column(
+        Integer,
+        ForeignKey("subjects.id"),
+        nullable=False,
+        index=True,
+    )
+
+    # Staff/teacher actually teaching this session
+    staff_id = Column(
+        Integer,
+        ForeignKey("staff.id"),
         nullable=False,
         index=True,
     )

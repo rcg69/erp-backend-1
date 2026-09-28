@@ -2,8 +2,8 @@ from sqlalchemy import (
     Column,
     ForeignKey,
     Integer,
-    String,
     SmallInteger,
+    String,
     Time,
     CheckConstraint,
 )
@@ -16,26 +16,11 @@ class Timetable(Base):
 
     id = Column(Integer, primary_key=True, index=True)
 
-    # Existing academic section
+    # The recurring academic section/slot.
+    # Subject and staff belong to the actual class session.
     section_id = Column(
         Integer,
         ForeignKey("sections.id"),
-        nullable=False,
-        index=True,
-    )
-
-    # Existing subject
-    subject_id = Column(
-        Integer,
-        ForeignKey("subjects.id"),
-        nullable=False,
-        index=True,
-    )
-
-    # Existing staff/teacher
-    staff_id = Column(
-        Integer,
-        ForeignKey("staff.id"),
         nullable=False,
         index=True,
     )

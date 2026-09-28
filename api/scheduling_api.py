@@ -28,6 +28,7 @@ router = APIRouter(
 # TIMETABLES
 # =========================================================
 
+
 # ---------------------------------------------------------
 # CREATE TIMETABLE
 # ---------------------------------------------------------
@@ -80,8 +81,6 @@ def create_timetable(
                 """
                 INSERT INTO timetables (
                     section_id,
-                    subject_id,
-                    staff_id,
                     day_of_week,
                     start_time,
                     end_time,
@@ -90,8 +89,6 @@ def create_timetable(
                 )
                 VALUES (
                     :section_id,
-                    :subject_id,
-                    :staff_id,
                     :day_of_week,
                     :start_time,
                     :end_time,
@@ -101,8 +98,6 @@ def create_timetable(
                 RETURNING
                     id,
                     section_id,
-                    subject_id,
-                    staff_id,
                     day_of_week,
                     start_time,
                     end_time,
@@ -112,8 +107,6 @@ def create_timetable(
             ),
             {
                 "section_id": timetable_data.section_id,
-                "subject_id": timetable_data.subject_id,
-                "staff_id": timetable_data.staff_id,
                 "day_of_week": timetable_data.day_of_week,
                 "start_time": timetable_data.start_time,
                 "end_time": timetable_data.end_time,
@@ -131,7 +124,7 @@ def create_timetable(
 
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Invalid section, subject, or staff reference",
+            detail="Invalid section reference",
         ) from exc
 
     except Exception as exc:
@@ -160,8 +153,6 @@ def get_timetables(
                 SELECT
                     id,
                     section_id,
-                    subject_id,
-                    staff_id,
                     day_of_week,
                     start_time,
                     end_time,
@@ -202,8 +193,6 @@ def get_timetable(
             SELECT
                 id,
                 section_id,
-                subject_id,
-                staff_id,
                 day_of_week,
                 start_time,
                 end_time,
@@ -244,8 +233,6 @@ def update_timetable(
             """
             SELECT
                 section_id,
-                subject_id,
-                staff_id,
                 day_of_week,
                 start_time,
                 end_time,
@@ -271,16 +258,6 @@ def update_timetable(
             timetable_data.section_id
             if timetable_data.section_id is not None
             else current["section_id"]
-        ),
-        "subject_id": (
-            timetable_data.subject_id
-            if timetable_data.subject_id is not None
-            else current["subject_id"]
-        ),
-        "staff_id": (
-            timetable_data.staff_id
-            if timetable_data.staff_id is not None
-            else current["staff_id"]
         ),
         "day_of_week": (
             timetable_data.day_of_week
@@ -346,8 +323,6 @@ def update_timetable(
                 UPDATE timetables
                 SET
                     section_id = :section_id,
-                    subject_id = :subject_id,
-                    staff_id = :staff_id,
                     day_of_week = :day_of_week,
                     start_time = :start_time,
                     end_time = :end_time,
@@ -357,8 +332,6 @@ def update_timetable(
                 RETURNING
                     id,
                     section_id,
-                    subject_id,
-                    staff_id,
                     day_of_week,
                     start_time,
                     end_time,
@@ -378,7 +351,7 @@ def update_timetable(
 
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Invalid section, subject, or staff reference",
+            detail="Invalid section reference",
         ) from exc
 
     except Exception as exc:
@@ -448,8 +421,6 @@ def delete_timetable(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Scheduling service unavailable",
         ) from exc
-
-
 # =========================================================
 # CLASS SESSIONS
 # =========================================================
@@ -486,18 +457,60 @@ def create_class_session(
             detail="Timetable not found",
         )
 
+    # Make sure subject exists.
+    subject = db.execute(
+        text(
+            """
+            SELECT id
+            FROM subjects
+            WHERE id = :subject_id
+              AND status = 'active'
+            """
+        ),
+        {"subject_id": session_data.subject_id},
+    ).first()
+
+    if not subject:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subject not found or inactive",
+        )
+
+    # Make sure staff exists.
+    staff = db.execute(
+        text(
+            """
+            SELECT id
+            FROM staff
+            WHERE id = :staff_id
+              AND status = 'active'
+            """
+        ),
+        {"staff_id": session_data.staff_id},
+    ).first()
+
+    if not staff:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Staff not found or inactive",
+        )
+
     try:
         row = db.execute(
             text(
                 """
                 INSERT INTO class_sessions (
                     timetable_id,
+                    subject_id,
+                    staff_id,
                     session_date,
                     is_conducted,
                     remarks
                 )
                 VALUES (
                     :timetable_id,
+                    :subject_id,
+                    :staff_id,
                     :session_date,
                     :is_conducted,
                     :remarks
@@ -505,6 +518,8 @@ def create_class_session(
                 RETURNING
                     id,
                     timetable_id,
+                    subject_id,
+                    staff_id,
                     session_date,
                     is_conducted,
                     remarks
@@ -512,6 +527,8 @@ def create_class_session(
             ),
             {
                 "timetable_id": session_data.timetable_id,
+                "subject_id": session_data.subject_id,
+                "staff_id": session_data.staff_id,
                 "session_date": session_data.session_date,
                 "is_conducted": session_data.is_conducted,
                 "remarks": session_data.remarks,
@@ -556,6 +573,8 @@ def get_class_sessions(
                 SELECT
                     id,
                     timetable_id,
+                    subject_id,
+                    staff_id,
                     session_date,
                     is_conducted,
                     remarks
@@ -626,6 +645,8 @@ def update_class_session(
 ):
     payload = {
         "timetable_id": session_data.timetable_id,
+        "subject_id": session_data.subject_id,
+        "staff_id": session_data.staff_id,
         "session_date": session_data.session_date,
         "is_conducted": session_data.is_conducted,
         "remarks": session_data.remarks,
@@ -636,6 +657,8 @@ def update_class_session(
 
     for field_name in [
         "timetable_id",
+        "subject_id",
+        "staff_id",
         "session_date",
         "is_conducted",
         "remarks",
@@ -661,6 +684,8 @@ def update_class_session(
                 RETURNING
                     id,
                     timetable_id,
+                    subject_id,
+                    staff_id,
                     session_date,
                     is_conducted,
                     remarks

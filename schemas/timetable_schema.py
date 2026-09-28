@@ -5,8 +5,6 @@ from pydantic import BaseModel, Field
 
 class TimetableCreate(BaseModel):
     section_id: int
-    subject_id: int
-    staff_id: int
 
     day_of_week: int = Field(
         ge=1,
@@ -23,8 +21,6 @@ class TimetableCreate(BaseModel):
 
 class TimetableUpdate(BaseModel):
     section_id: int | None = None
-    subject_id: int | None = None
-    staff_id: int | None = None
 
     day_of_week: int | None = Field(
         default=None,
@@ -42,8 +38,6 @@ class TimetableUpdate(BaseModel):
 class TimetableResponse(BaseModel):
     id: int
     section_id: int
-    subject_id: int
-    staff_id: int
     day_of_week: int
     start_time: time
     end_time: time

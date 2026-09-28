@@ -478,19 +478,14 @@ def ensure_database_schema() -> None:
         # TIMETABLE / SCHEDULE
         # =========================================================
         #
+        # A timetable is the recurring time/room slot.
+        # Subject and staff belong to class_sessions because they
+        # describe the actual class taught on a specific date.
+        #
         # section_id -> sections.id
-        # subject_id -> subjects.id
-        # staff_id   -> staff.id
         #
         # day_of_week:
-        #
-        # 1 = Monday
-        # 2 = Tuesday
-        # 3 = Wednesday
-        # 4 = Thursday
-        # 5 = Friday
-        # 6 = Saturday
-        # 7 = Sunday
+        # 1 = Monday ... 7 = Sunday
         #
         # =========================================================
 
@@ -502,14 +497,6 @@ def ensure_database_schema() -> None:
 
                     section_id INTEGER NOT NULL
                         REFERENCES sections(id)
-                        ON DELETE RESTRICT,
-
-                    subject_id INTEGER NOT NULL
-                        REFERENCES subjects(id)
-                        ON DELETE RESTRICT,
-
-                    staff_id INTEGER NOT NULL
-                        REFERENCES staff(id)
                         ON DELETE RESTRICT,
 
                     day_of_week SMALLINT NOT NULL,
@@ -536,20 +523,9 @@ def ensure_database_schema() -> None:
         # CLASS SESSIONS
         # =========================================================
         #
-        # A timetable defines the recurring schedule.
-        #
-        # A class_session represents one actual date.
-        #
-        # Example:
-        #
-        # Timetable:
-        #   Class 10-A
-        #   Mathematics
-        #   Monday
-        #   09:00 - 10:00
-        #
-        # Session:
-        #   2026-09-28
+        # A timetable defines the recurring slot.
+        # A class_session represents one actual date and records
+        # the subject and staff for that occurrence.
         #
         # =========================================================
 
@@ -563,6 +539,14 @@ def ensure_database_schema() -> None:
                         REFERENCES timetables(id)
                         ON DELETE CASCADE,
 
+                    subject_id INTEGER NOT NULL
+                        REFERENCES subjects(id)
+                        ON DELETE RESTRICT,
+
+                    staff_id INTEGER NOT NULL
+                        REFERENCES staff(id)
+                        ON DELETE RESTRICT,
+
                     session_date DATE NOT NULL,
 
                     is_conducted BOOLEAN NOT NULL DEFAULT FALSE,
@@ -575,6 +559,138 @@ def ensure_database_schema() -> None:
                             session_date
                         )
                 )
+                """
+            )
+        )
+
+        # =========================================================
+        # SCHEDULING SCHEMA MIGRATION
+        # =========================================================
+        #
+        # Older versions stored subject_id/staff_id on timetables.
+        # Move those values to class_sessions before removing the
+        # old timetable columns. Existing session rows therefore keep
+        # their subject/staff association.
+        #
+        # =========================================================
+
+        connection.execute(
+            text(
+                """
+                ALTER TABLE class_sessions
+                ADD COLUMN IF NOT EXISTS subject_id INTEGER
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                ALTER TABLE class_sessions
+                ADD COLUMN IF NOT EXISTS staff_id INTEGER
+                """
+            )
+        )
+
+        # If the old timetable columns still exist, copy their values
+        # into existing class sessions.
+        timetable_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("timetables")
+        }
+
+        if {"subject_id", "staff_id"}.issubset(timetable_columns):
+            connection.execute(
+                text(
+                    """
+                    UPDATE class_sessions cs
+                    SET
+                        subject_id = t.subject_id,
+                        staff_id = t.staff_id
+                    FROM timetables t
+                    WHERE cs.timetable_id = t.id
+                      AND cs.subject_id IS NULL
+                    """
+                )
+            )
+
+            # Remove old indexes before removing the old columns.
+            connection.execute(
+                text(
+                    """
+                    DROP INDEX IF EXISTS idx_timetables_staff
+                    """
+                )
+            )
+
+            connection.execute(
+                text(
+                    """
+                    DROP INDEX IF EXISTS idx_timetables_subject
+                    """
+                )
+            )
+
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE timetables
+                    DROP COLUMN IF EXISTS subject_id
+                    """
+                )
+            )
+
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE timetables
+                    DROP COLUMN IF EXISTS staff_id
+                    """
+                )
+            )
+
+        # Add foreign keys to the new session columns when they do not
+        # already exist. This is safe for an existing database.
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'fk_class_sessions_subject'
+                    ) THEN
+                        ALTER TABLE class_sessions
+                        ADD CONSTRAINT fk_class_sessions_subject
+                        FOREIGN KEY (subject_id)
+                        REFERENCES subjects(id)
+                        ON DELETE RESTRICT;
+                    END IF;
+                END
+                $$;
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'fk_class_sessions_staff'
+                    ) THEN
+                        ALTER TABLE class_sessions
+                        ADD CONSTRAINT fk_class_sessions_staff
+                        FOREIGN KEY (staff_id)
+                        REFERENCES staff(id)
+                        ON DELETE RESTRICT;
+                    END IF;
+                END
+                $$;
                 """
             )
         )
@@ -653,8 +769,8 @@ def ensure_database_schema() -> None:
         connection.execute(
             text(
                 """
-                CREATE INDEX IF NOT EXISTS idx_timetables_staff
-                ON timetables(staff_id)
+                CREATE INDEX IF NOT EXISTS idx_class_sessions_subject
+                ON class_sessions(subject_id)
                 """
             )
         )
@@ -662,8 +778,8 @@ def ensure_database_schema() -> None:
         connection.execute(
             text(
                 """
-                CREATE INDEX IF NOT EXISTS idx_timetables_subject
-                ON timetables(subject_id)
+                CREATE INDEX IF NOT EXISTS idx_class_sessions_staff
+                ON class_sessions(staff_id)
                 """
             )
         )
