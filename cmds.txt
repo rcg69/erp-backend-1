@@ -8,3 +8,32 @@ admin payload for login
   "email": "admin@gmail.com",
   "password": "ram123"
 }
+ academics final structure 
+
+ timetables
+-------------------------
+id
+section_id       → existing sections.id
+subject_id       → existing subjects.id
+staff_id         → existing staff.id
+day_of_week
+start_time
+end_time
+room
+status
+
+class_sessions
+-------------------------
+id
+timetable_id     → timetables.id
+session_date
+is_conducted
+remarks
+
+attendance
+-------------------------
+id
+session_id       → class_sessions.id
+student_id       → existing students.id
+status
+remarks
