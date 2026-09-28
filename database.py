@@ -398,7 +398,7 @@ def ensure_database_schema() -> None:
         # PHY   -> Physics
         # CHEM  -> Chemistry
         #
-        # timetables.subject_id references subjects.id.
+        # class_sessions.subject_id references subjects.id.
         #
         # =========================================================
 
@@ -691,6 +691,112 @@ def ensure_database_schema() -> None:
                     END IF;
                 END
                 $$;
+                """
+            )
+        )
+
+        # =========================================================
+        # TIMETABLE GRID (class + section + period)
+        # =========================================================
+        #
+        # An admin "opens" a timetable for one class (a grades row,
+        # which already carries the academic year) and one section.
+        # That creates a fixed Monday-Saturday x Period 1-6 grid of
+        # timetable rows (36 slots).
+        #
+        # default_subject_id / default_staff_id hold the weekly
+        # assignment for a slot. They are deliberately NOT named
+        # subject_id / staff_id, because the migration above drops
+        # timetables.subject_id and timetables.staff_id on startup.
+        #
+        # Dated class_sessions are generated from these defaults and
+        # copy the values, so a session can still be overridden for a
+        # substitution without touching the weekly grid.
+        #
+        # All new columns are nullable so legacy rows keep working.
+        #
+        # =========================================================
+
+        for statement in (
+            """
+            ALTER TABLE timetables
+            ADD COLUMN IF NOT EXISTS grade_id INTEGER
+                REFERENCES grades(id)
+                ON DELETE RESTRICT
+            """,
+            """
+            ALTER TABLE timetables
+            ADD COLUMN IF NOT EXISTS period_number SMALLINT
+            """,
+            """
+            ALTER TABLE timetables
+            ADD COLUMN IF NOT EXISTS default_subject_id INTEGER
+                REFERENCES subjects(id)
+                ON DELETE SET NULL
+            """,
+            """
+            ALTER TABLE timetables
+            ADD COLUMN IF NOT EXISTS default_staff_id INTEGER
+                REFERENCES staff(id)
+                ON DELETE SET NULL
+            """,
+            """
+            ALTER TABLE timetables
+            ADD COLUMN IF NOT EXISTS valid_from DATE
+            """,
+            """
+            ALTER TABLE timetables
+            ADD COLUMN IF NOT EXISTS valid_to DATE
+            """,
+        ):
+            connection.execute(text(statement))
+
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'ck_timetable_period_number'
+                    ) THEN
+                        ALTER TABLE timetables
+                        ADD CONSTRAINT ck_timetable_period_number
+                        CHECK (
+                            period_number IS NULL
+                            OR period_number BETWEEN 1 AND 12
+                        );
+                    END IF;
+                END
+                $$;
+                """
+            )
+        )
+
+        # One slot per class + section + day + period.
+        # Legacy rows (grade_id / period_number NULL) are unaffected
+        # because PostgreSQL treats NULLs as distinct in unique indexes.
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_timetable_grade_section_day_period
+                ON timetables (
+                    grade_id,
+                    section_id,
+                    day_of_week,
+                    period_number
+                )
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_timetables_grade
+                ON timetables(grade_id)
                 """
             )
         )

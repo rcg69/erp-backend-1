@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -20,6 +22,119 @@ router = APIRouter(
 
 
 # =========================================================
+# HELPERS
+# =========================================================
+
+def _normalize_grade(value):
+    """'10', '10th', '10th Class' -> '10'. Non-numeric grades compare as text."""
+    if value is None:
+        return None
+
+    text_value = str(value).strip().lower()
+
+    if not text_value:
+        return None
+
+    match = re.search(r"\d+", text_value)
+
+    return match.group(0) if match else text_value
+
+
+def _get_session_context(db: Session, session_id: int):
+    """Return the section (and class) a class session belongs to."""
+    row = db.execute(
+        text(
+            """
+            SELECT
+                cs.id,
+                sec.section AS section,
+                g.grade AS grade
+            FROM class_sessions cs
+            JOIN timetables t ON t.id = cs.timetable_id
+            JOIN sections sec ON sec.id = t.section_id
+            LEFT JOIN grades g ON g.id = t.grade_id
+            WHERE cs.id = :session_id
+            """
+        ),
+        {
+            "session_id": session_id,
+        },
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Class session not found",
+        )
+
+    return row
+
+
+def _student_in_session_class(student, context) -> bool:
+    student_section = (student["section"] or "").strip().lower()
+
+    if student_section != (context["section"] or "").strip().lower():
+        return False
+
+    # Only compare the class when both sides have one.
+    session_grade = _normalize_grade(context["grade"])
+    student_grade = _normalize_grade(student["grade"])
+
+    if session_grade and student_grade and session_grade != student_grade:
+        return False
+
+    return True
+
+
+def _validate_students_for_session(
+    db: Session,
+    context,
+    student_ids: list[int],
+):
+    """
+    One query for all students. Raises 404 if any student does not exist
+    and 400 if any student is not in the session's section.
+    """
+    rows = db.execute(
+        text(
+            """
+            SELECT id, section, grade
+            FROM students
+            WHERE id = ANY(:student_ids)
+            """
+        ),
+        {
+            "student_ids": student_ids,
+        },
+    ).mappings().all()
+
+    found = {row["id"]: row for row in rows}
+
+    missing = sorted(set(student_ids) - set(found))
+
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Student not found: "
+            + ", ".join(str(student_id) for student_id in missing),
+        )
+
+    outside = [
+        student_id
+        for student_id in student_ids
+        if not _student_in_session_class(found[student_id], context)
+    ]
+
+    if outside:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Student(s) not in this session's section: "
+            + ", ".join(str(student_id) for student_id in outside),
+        )
+
+
+
+# =========================================================
 # CREATE ATTENDANCE
 # =========================================================
 
@@ -32,45 +147,15 @@ def create_attendance(
     attendance_data: AttendanceCreate,
     db: Session = Depends(get_db),
 ):
-    # Verify session exists
-    session = db.execute(
-        text(
-            """
-            SELECT id
-            FROM class_sessions
-            WHERE id = :session_id
-            """
-        ),
-        {
-            "session_id": attendance_data.session_id,
-        },
-    ).first()
+    # Verify session exists and load its section
+    context = _get_session_context(db, attendance_data.session_id)
 
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Class session not found",
-        )
-
-    # Verify student exists
-    student = db.execute(
-        text(
-            """
-            SELECT id
-            FROM students
-            WHERE id = :student_id
-            """
-        ),
-        {
-            "student_id": attendance_data.student_id,
-        },
-    ).first()
-
-    if not student:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Student not found",
-        )
+    # Verify student exists and belongs to the session's section
+    _validate_students_for_session(
+        db,
+        context,
+        [attendance_data.student_id],
+    )
 
     try:
         row = db.execute(
@@ -343,55 +428,39 @@ def create_bulk_attendance(
     attendance_data: AttendanceBulkCreate,
     db: Session = Depends(get_db),
 ):
-    # Verify session
-    session = db.execute(
-        text(
-            """
-            SELECT id
-            FROM class_sessions
-            WHERE id = :session_id
-            """
-        ),
-        {
-            "session_id": attendance_data.session_id,
-        },
-    ).first()
-
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Class session not found",
-        )
-
     if not attendance_data.records:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Attendance records cannot be empty",
         )
 
+    student_ids = [record.student_id for record in attendance_data.records]
+
+    duplicates = sorted(
+        {
+            student_id
+            for student_id in student_ids
+            if student_ids.count(student_id) > 1
+        }
+    )
+
+    if duplicates:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Duplicate student in attendance records: "
+            + ", ".join(str(student_id) for student_id in duplicates),
+        )
+
+    # Verify session exists and load its section
+    context = _get_session_context(db, attendance_data.session_id)
+
+    # One query for every student instead of one per record
+    _validate_students_for_session(db, context, student_ids)
+
     try:
         created_records = []
 
         for record in attendance_data.records:
-
-            student = db.execute(
-                text(
-                    """
-                    SELECT id
-                    FROM students
-                    WHERE id = :student_id
-                    """
-                ),
-                {
-                    "student_id": record.student_id,
-                },
-            ).first()
-
-            if not student:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Student {record.student_id} not found",
-                )
 
             row = db.execute(
                 text(
