@@ -1,4 +1,4 @@
-from datetime import time, timedelta
+from datetime import date, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
@@ -16,6 +16,7 @@ from schemas.timetable_schema import (
 )
 
 from schemas.class_session_schema import (
+    ClassDaySessionsResponse,
     ClassSessionCreate,
     ClassSessionResponse,
     ClassSessionUpdate,
@@ -76,6 +77,80 @@ SESSION_COLUMNS = """
     is_conducted,
     remarks
 """
+
+
+def _generate_sessions(
+    db: Session,
+    *,
+    grade_id: int,
+    section_id: int,
+    start_date: date,
+    end_date: date,
+    skip_dates: list[date] | None = None,
+    timetable_id: int | None = None,
+) -> int:
+    """
+    Insert one dated class_sessions row for every ASSIGNED slot (subject and
+    staff both set) on every matching weekday in the range. Slots without a
+    subject/staff are skipped because class_sessions.subject_id / staff_id
+    are NOT NULL. Existing (timetable_id, session_date) rows are never
+    touched, so substitutions and attendance are safe.
+
+    Pass timetable_id to generate for a single slot. The caller owns the
+    transaction (no commit here). Returns the number of rows created.
+    """
+    created = db.execute(
+        text(
+            """
+            INSERT INTO class_sessions (
+                timetable_id,
+                subject_id,
+                staff_id,
+                session_date,
+                is_conducted
+            )
+            SELECT
+                t.id,
+                t.default_subject_id,
+                t.default_staff_id,
+                CAST(d AS date),
+                FALSE
+            FROM timetables t
+            CROSS JOIN generate_series(
+                CAST(:start_date AS date),
+                CAST(:end_date AS date),
+                INTERVAL '1 day'
+            ) AS d
+            WHERE t.grade_id = :grade_id
+              AND t.section_id = :section_id
+              AND t.status = 'active'
+              AND t.default_subject_id IS NOT NULL
+              AND t.default_staff_id IS NOT NULL
+              AND (
+                  CAST(:timetable_id AS integer) IS NULL
+                  OR t.id = CAST(:timetable_id AS integer)
+              )
+              AND EXTRACT(ISODOW FROM d) = t.day_of_week
+              AND (t.valid_from IS NULL OR CAST(d AS date) >= t.valid_from)
+              AND (t.valid_to IS NULL OR CAST(d AS date) <= t.valid_to)
+              AND NOT (
+                  CAST(d AS date) = ANY(CAST(:skip_dates AS date[]))
+              )
+            ON CONFLICT (timetable_id, session_date) DO NOTHING
+            RETURNING id
+            """
+        ),
+        {
+            "grade_id": grade_id,
+            "section_id": section_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "skip_dates": list(skip_dates or []),
+            "timetable_id": timetable_id,
+        },
+    ).all()
+
+    return len(created)
 
 
 # =========================================================
@@ -172,6 +247,19 @@ def open_timetable(
                 """
             ),
             slots,
+        )
+
+        # Slots that already have a subject + staff get their dated sessions
+        # immediately (re-opening a grid fills in anything that is missing).
+        _generate_sessions(
+            db,
+            grade_id=open_data.grade_id,
+            section_id=open_data.section_id,
+            start_date=open_data.valid_from,
+            end_date=min(
+                open_data.valid_to,
+                open_data.valid_from + timedelta(days=MAX_GENERATE_DAYS),
+            ),
         )
 
         rows = db.execute(
@@ -310,6 +398,26 @@ def assign_timetable_slot(
                 "staff_id": assignment.staff_id,
             },
         ).mappings().first()
+
+        # A fully assigned slot gets its dated sessions right away.
+        if (
+            row["default_subject_id"] is not None
+            and row["default_staff_id"] is not None
+            and row["grade_id"] is not None
+            and row["valid_from"] is not None
+            and row["valid_to"] is not None
+        ):
+            _generate_sessions(
+                db,
+                grade_id=row["grade_id"],
+                section_id=row["section_id"],
+                start_date=row["valid_from"],
+                end_date=min(
+                    row["valid_to"],
+                    row["valid_from"] + timedelta(days=MAX_GENERATE_DAYS),
+                ),
+                timetable_id=row["id"],
+            )
 
         db.commit()
 
@@ -812,56 +920,21 @@ def generate_class_sessions(
         )
 
     try:
-        created = db.execute(
-            text(
-                """
-                INSERT INTO class_sessions (
-                    timetable_id,
-                    subject_id,
-                    staff_id,
-                    session_date,
-                    is_conducted
-                )
-                SELECT
-                    t.id,
-                    t.default_subject_id,
-                    t.default_staff_id,
-                    CAST(d AS date),
-                    FALSE
-                FROM timetables t
-                CROSS JOIN generate_series(
-                    CAST(:start_date AS date),
-                    CAST(:end_date AS date),
-                    INTERVAL '1 day'
-                ) AS d
-                WHERE t.grade_id = :grade_id
-                  AND t.section_id = :section_id
-                  AND t.status = 'active'
-                  AND t.default_subject_id IS NOT NULL
-                  AND t.default_staff_id IS NOT NULL
-                  AND EXTRACT(ISODOW FROM d) = t.day_of_week
-                  AND NOT (
-                      CAST(d AS date) = ANY(CAST(:skip_dates AS date[]))
-                  )
-                ON CONFLICT (timetable_id, session_date) DO NOTHING
-                RETURNING id
-                """
-            ),
-            {
-                "grade_id": generate_data.grade_id,
-                "section_id": generate_data.section_id,
-                "start_date": start_date,
-                "end_date": end_date,
-                "skip_dates": list(generate_data.skip_dates),
-            },
-        ).all()
+        created = _generate_sessions(
+            db,
+            grade_id=generate_data.grade_id,
+            section_id=generate_data.section_id,
+            start_date=start_date,
+            end_date=end_date,
+            skip_dates=list(generate_data.skip_dates),
+        )
 
         db.commit()
 
         return {
             "success": True,
             "message": "Class sessions generated successfully",
-            "created": len(created),
+            "created": created,
             "assigned_slots": summary["assigned"],
             "unassigned_slots": summary["total"] - summary["assigned"],
             "start_date": start_date,
@@ -1029,6 +1102,147 @@ def get_class_sessions(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Scheduling service unavailable",
         ) from exc
+
+
+# ---------------------------------------------------------
+# ALL SESSIONS FOR ONE CLASS + SECTION ON ONE DATE
+# ---------------------------------------------------------
+# Finds the weekday of the date, takes every active timetable slot of that
+# class + section for that weekday (inside its validity range), makes sure a
+# dated class session exists for every assigned slot, and returns one row per
+# period. Slots with no subject/staff come back with ready = false.
+#
+# Must be declared before /sessions/{session_id}, otherwise "by-class" would
+# be parsed as a session id.
+@router.get(
+    "/sessions/by-class",
+    response_model=ClassDaySessionsResponse,
+)
+def get_sessions_for_class_on_date(
+    grade_id: int = Query(...),
+    section_id: int = Query(...),
+    session_date: date = Query(...),
+    db: Session = Depends(get_db),
+):
+    day_of_week = session_date.isoweekday()  # 1 = Monday ... 7 = Sunday
+
+    try:
+        slots = db.execute(
+            text(
+                f"""
+                SELECT {TIMETABLE_COLUMNS}
+                FROM timetables
+                WHERE grade_id = :grade_id
+                  AND section_id = :section_id
+                  AND status = 'active'
+                  AND day_of_week = :day_of_week
+                  AND (valid_from IS NULL OR valid_from <= :session_date)
+                  AND (valid_to IS NULL OR valid_to >= :session_date)
+                ORDER BY period_number NULLS LAST, start_time
+                """
+            ),
+            {
+                "grade_id": grade_id,
+                "section_id": section_id,
+                "day_of_week": day_of_week,
+                "session_date": session_date,
+            },
+        ).mappings().all()
+
+        sessions = []
+
+        if slots:
+            slot_ids = [slot["id"] for slot in slots]
+
+            # Create whatever is missing for assigned slots, then read back.
+            db.execute(
+                text(
+                    """
+                    INSERT INTO class_sessions (
+                        timetable_id,
+                        subject_id,
+                        staff_id,
+                        session_date,
+                        is_conducted
+                    )
+                    SELECT
+                        t.id,
+                        t.default_subject_id,
+                        t.default_staff_id,
+                        CAST(:session_date AS date),
+                        FALSE
+                    FROM timetables t
+                    WHERE t.id = ANY(:slot_ids)
+                      AND t.default_subject_id IS NOT NULL
+                      AND t.default_staff_id IS NOT NULL
+                    ON CONFLICT (timetable_id, session_date) DO NOTHING
+                    """
+                ),
+                {
+                    "slot_ids": slot_ids,
+                    "session_date": session_date,
+                },
+            )
+
+            db.commit()
+
+            sessions = db.execute(
+                text(
+                    f"""
+                    SELECT {SESSION_COLUMNS}
+                    FROM class_sessions
+                    WHERE session_date = :session_date
+                      AND timetable_id = ANY(:slot_ids)
+                    """
+                ),
+                {
+                    "slot_ids": slot_ids,
+                    "session_date": session_date,
+                },
+            ).mappings().all()
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+    session_by_timetable = {}
+
+    for session in sessions:
+        session_by_timetable.setdefault(session["timetable_id"], session)
+
+    periods = []
+
+    for slot in slots:
+        session = session_by_timetable.get(slot["id"])
+
+        periods.append(
+            {
+                "timetable_id": slot["id"],
+                "period_number": slot["period_number"],
+                "day_of_week": slot["day_of_week"],
+                "start_time": slot["start_time"],
+                "end_time": slot["end_time"],
+                "default_subject_id": slot["default_subject_id"],
+                "default_staff_id": slot["default_staff_id"],
+                "session_id": session["id"] if session else None,
+                "subject_id": session["subject_id"] if session else None,
+                "staff_id": session["staff_id"] if session else None,
+                "is_conducted": session["is_conducted"] if session else False,
+                "ready": session is not None,
+            }
+        )
+
+    return {
+        "grade_id": grade_id,
+        "section_id": section_id,
+        "session_date": session_date,
+        "day_of_week": day_of_week,
+        "sessions": periods,
+    }
 
 
 # ---------------------------------------------------------
