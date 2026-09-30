@@ -1,11 +1,19 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from security.auth import get_current_user
 from database import get_db
 
 from schemas.user_schema import UserCreate, UserResponse
+from services.password_service import hash_password
 
-router = APIRouter(prefix="/api/users", tags=["Users"])
+
+router = APIRouter(
+    prefix="/api/users",
+    tags=["Users"]
+)
 
 USER_COLUMNS = "id, email, username, person_id, role_id, is_active"
 
@@ -31,10 +39,14 @@ def _duplicate_error(exc: Exception) -> HTTPException:
     )
 
 
-router = APIRouter(
-    prefix="/api/users",
-    tags=["Users"]
-)
+def _user_payload(user: UserCreate, role_id: int) -> dict:
+    return {
+        "email": str(user.email).strip().lower(),
+        "username": user.username.strip(),
+        "password_hash": hash_password(user.password),
+        "role_id": role_id,
+        "person_id": user.person_id,
+    }
 
 
 @router.get("", response_model=list[UserResponse])
@@ -45,8 +57,11 @@ def get_users(
     try:
         users = db.execute(
             text(
-                f"SELECT {USER_COLUMNS} "
-                "FROM users ORDER BY id"
+                f"""
+                SELECT {USER_COLUMNS}
+                FROM users
+                ORDER BY id
+                """
             )
         ).mappings().all()
 
@@ -177,9 +192,7 @@ def create_user(
 
         elif role_name == "admin":
 
-            # Admin does not need a student/staff person_id.
-            # Keep the supplied value as it is for now.
-
+            # Admin does not require a student/staff person_id.
             pass
 
         else:
@@ -381,6 +394,7 @@ def update_user(
 
         elif role_name == "admin":
 
+            # Admin does not require a student/staff person_id.
             pass
 
         else:
@@ -400,7 +414,34 @@ def update_user(
         )
 
         # ---------------------------------------------------------
-        # 5. Update user
+        # 5. Check duplicate email/username
+        # ---------------------------------------------------------
+
+        duplicate = db.execute(
+            text(
+                """
+                SELECT 1
+                FROM users
+                WHERE (email = :email OR username = :username)
+                  AND id != :user_id
+                LIMIT 1
+                """
+            ),
+            {
+                "email": payload["email"],
+                "username": payload["username"],
+                "user_id": user_id,
+            },
+        ).first()
+
+        if duplicate:
+            raise HTTPException(
+                status_code=409,
+                detail="Email or username already exists"
+            )
+
+        # ---------------------------------------------------------
+        # 6. Update user
         # ---------------------------------------------------------
 
         updated = db.execute(
@@ -456,6 +497,10 @@ def delete_user(
     db: Session = Depends(get_db),
 ):
     try:
+
+        # ---------------------------------------------------------
+        # 1. Delete user
+        # ---------------------------------------------------------
 
         deleted = db.execute(
             text(
