@@ -1,0 +1,1321 @@
+from datetime import date, time, timedelta
+
+from fastapi import HTTPException, status, Query
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from schemas.timetable_schema import (
+    TimetableAssignment,
+    TimetableCreate,
+    TimetableOpenRequest,
+    TimetableUpdate,
+)
+
+from schemas.class_session_schema import (
+    ClassDaySessionsResponse,
+    ClassSessionCreate,
+    ClassSessionResponse,
+    ClassSessionUpdate,
+    SessionGenerateRequest,
+    SessionGenerateResponse,
+)
+
+
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+WORKING_DAYS = range(1, 7)
+
+DEFAULT_PERIODS = {
+    1: (time(9, 0), time(9, 50)),
+    2: (time(9, 50), time(10, 40)),
+    3: (time(10, 50), time(11, 40)),
+    4: (time(11, 40), time(12, 30)),
+    5: (time(13, 30), time(14, 20)),
+    6: (time(14, 20), time(15, 10)),
+}
+
+MAX_GENERATE_DAYS = 400
+
+TIMETABLE_COLUMNS = """
+    id,
+    section_id,
+    grade_id,
+    day_of_week,
+    period_number,
+    start_time,
+    end_time,
+    room,
+    status,
+    default_subject_id,
+    default_staff_id,
+    valid_from,
+    valid_to
+"""
+
+SESSION_COLUMNS = """
+    id,
+    timetable_id,
+    subject_id,
+    staff_id,
+    session_date,
+    is_conducted,
+    remarks
+"""
+
+
+# =========================================================
+# SESSION GENERATION HELPER
+# =========================================================
+
+def _generate_sessions(
+    db: Session,
+    *,
+    grade_id: int,
+    section_id: int,
+    start_date: date,
+    end_date: date,
+    skip_dates: list[date] | None = None,
+    timetable_id: int | None = None,
+) -> int:
+
+    created = db.execute(
+        text(
+            """
+            INSERT INTO class_sessions (
+                timetable_id,
+                subject_id,
+                staff_id,
+                session_date,
+                is_conducted
+            )
+            SELECT
+                t.id,
+                t.default_subject_id,
+                t.default_staff_id,
+                CAST(d AS date),
+                FALSE
+            FROM timetables t
+            CROSS JOIN generate_series(
+                CAST(:start_date AS date),
+                CAST(:end_date AS date),
+                INTERVAL '1 day'
+            ) AS d
+            WHERE t.grade_id = :grade_id
+              AND t.section_id = :section_id
+              AND t.status = 'active'
+              AND t.default_subject_id IS NOT NULL
+              AND t.default_staff_id IS NOT NULL
+              AND (
+                  CAST(:timetable_id AS integer) IS NULL
+                  OR t.id = CAST(:timetable_id AS integer)
+              )
+              AND EXTRACT(ISODOW FROM d) = t.day_of_week
+              AND (
+                  t.valid_from IS NULL
+                  OR CAST(d AS date) >= t.valid_from
+              )
+              AND (
+                  t.valid_to IS NULL
+                  OR CAST(d AS date) <= t.valid_to
+              )
+              AND NOT (
+                  CAST(d AS date) = ANY(CAST(:skip_dates AS date[]))
+              )
+            ON CONFLICT (timetable_id, session_date) DO NOTHING
+            RETURNING id
+            """
+        ),
+        {
+            "grade_id": grade_id,
+            "section_id": section_id,
+            "start_date": start_date,
+            "end_date": end_date,
+            "skip_dates": list(skip_dates or []),
+            "timetable_id": timetable_id,
+        },
+    ).all()
+
+    return len(created)
+
+
+# =========================================================
+# TIMETABLES
+# =========================================================
+
+def open_timetable(
+    open_data: TimetableOpenRequest,
+    db: Session,
+):
+    grade = db.execute(
+        text("SELECT id FROM grades WHERE id = :grade_id"),
+        {"grade_id": open_data.grade_id},
+    ).first()
+
+    if not grade:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Class not found",
+        )
+
+    section = db.execute(
+        text("SELECT id FROM sections WHERE id = :section_id"),
+        {"section_id": open_data.section_id},
+    ).first()
+
+    if not section:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Section not found",
+        )
+
+    slots = [
+        {
+            "grade_id": open_data.grade_id,
+            "section_id": open_data.section_id,
+            "day_of_week": day,
+            "period_number": period,
+            "start_time": start,
+            "end_time": end,
+            "valid_from": open_data.valid_from,
+            "valid_to": open_data.valid_to,
+        }
+        for day in WORKING_DAYS
+        for period, (start, end) in DEFAULT_PERIODS.items()
+    ]
+
+    try:
+        db.execute(
+            text(
+                """
+                INSERT INTO timetables (
+                    grade_id,
+                    section_id,
+                    day_of_week,
+                    period_number,
+                    start_time,
+                    end_time,
+                    status,
+                    valid_from,
+                    valid_to
+                )
+                VALUES (
+                    :grade_id,
+                    :section_id,
+                    :day_of_week,
+                    :period_number,
+                    :start_time,
+                    :end_time,
+                    'active',
+                    :valid_from,
+                    :valid_to
+                )
+                ON CONFLICT (
+                    grade_id,
+                    section_id,
+                    day_of_week,
+                    period_number
+                )
+                DO UPDATE SET
+                    valid_from = EXCLUDED.valid_from,
+                    valid_to = EXCLUDED.valid_to
+                """
+            ),
+            slots,
+        )
+
+        _generate_sessions(
+            db,
+            grade_id=open_data.grade_id,
+            section_id=open_data.section_id,
+            start_date=open_data.valid_from,
+            end_date=min(
+                open_data.valid_to,
+                open_data.valid_from + timedelta(days=MAX_GENERATE_DAYS),
+            ),
+        )
+
+        rows = db.execute(
+            text(
+                f"""
+                SELECT {TIMETABLE_COLUMNS}
+                FROM timetables
+                WHERE grade_id = :grade_id
+                  AND section_id = :section_id
+                ORDER BY day_of_week, period_number
+                """
+            ),
+            {
+                "grade_id": open_data.grade_id,
+                "section_id": open_data.section_id,
+            },
+        ).mappings().all()
+
+        db.commit()
+
+        return [dict(row) for row in rows]
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def assign_timetable_slot(
+    timetable_id: int,
+    assignment: TimetableAssignment,
+    db: Session,
+):
+    slot = db.execute(
+        text(
+            "SELECT id FROM timetables WHERE id = :timetable_id"
+        ),
+        {"timetable_id": timetable_id},
+    ).first()
+
+    if not slot:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Timetable not found",
+        )
+
+    if assignment.subject_id is not None:
+        subject = db.execute(
+            text(
+                """
+                SELECT id
+                FROM subjects
+                WHERE id = :subject_id
+                  AND status = 'active'
+                """
+            ),
+            {"subject_id": assignment.subject_id},
+        ).first()
+
+        if not subject:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Subject not found or inactive",
+            )
+
+    if assignment.staff_id is not None:
+        staff = db.execute(
+            text(
+                """
+                SELECT id
+                FROM staff
+                WHERE id = :staff_id
+                  AND status = 'active'
+                """
+            ),
+            {"staff_id": assignment.staff_id},
+        ).first()
+
+        if not staff:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Staff not found or inactive",
+            )
+
+        staff_conflict = db.execute(
+            text(
+                """
+                SELECT other.id
+                FROM timetables other
+                JOIN timetables me ON me.id = :timetable_id
+                WHERE other.id != me.id
+                  AND other.status = 'active'
+                  AND other.default_staff_id = :staff_id
+                  AND other.day_of_week = me.day_of_week
+                  AND other.start_time < me.end_time
+                  AND other.end_time > me.start_time
+                LIMIT 1
+                """
+            ),
+            {
+                "timetable_id": timetable_id,
+                "staff_id": assignment.staff_id,
+            },
+        ).first()
+
+        if staff_conflict:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This staff member is already assigned to another class at this time",
+            )
+
+    try:
+        row = db.execute(
+            text(
+                f"""
+                UPDATE timetables
+                SET
+                    default_subject_id = :subject_id,
+                    default_staff_id = :staff_id
+                WHERE id = :timetable_id
+                RETURNING {TIMETABLE_COLUMNS}
+                """
+            ),
+            {
+                "timetable_id": timetable_id,
+                "subject_id": assignment.subject_id,
+                "staff_id": assignment.staff_id,
+            },
+        ).mappings().first()
+
+        if (
+            row["default_subject_id"] is not None
+            and row["default_staff_id"] is not None
+            and row["grade_id"] is not None
+            and row["valid_from"] is not None
+            and row["valid_to"] is not None
+        ):
+            _generate_sessions(
+                db,
+                grade_id=row["grade_id"],
+                section_id=row["section_id"],
+                start_date=row["valid_from"],
+                end_date=min(
+                    row["valid_to"],
+                    row["valid_from"] + timedelta(days=MAX_GENERATE_DAYS),
+                ),
+                timetable_id=row["id"],
+            )
+
+        db.commit()
+
+        return dict(row)
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def create_timetable(
+    timetable_data: TimetableCreate,
+    db: Session,
+):
+    if timetable_data.start_time >= timetable_data.end_time:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Start time must be before end time",
+        )
+
+    conflict = db.execute(
+        text(
+            """
+            SELECT id
+            FROM timetables
+            WHERE section_id = :section_id
+              AND grade_id IS NOT DISTINCT FROM :grade_id
+              AND day_of_week = :day_of_week
+              AND status = 'active'
+              AND start_time < :end_time
+              AND end_time > :start_time
+            LIMIT 1
+            """
+        ),
+        {
+            "section_id": timetable_data.section_id,
+            "grade_id": timetable_data.grade_id,
+            "day_of_week": timetable_data.day_of_week,
+            "start_time": timetable_data.start_time,
+            "end_time": timetable_data.end_time,
+        },
+    ).first()
+
+    if conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This section already has a timetable entry during this time",
+        )
+
+    try:
+        row = db.execute(
+            text(
+                f"""
+                INSERT INTO timetables (
+                    section_id,
+                    grade_id,
+                    day_of_week,
+                    period_number,
+                    start_time,
+                    end_time,
+                    room,
+                    status
+                )
+                VALUES (
+                    :section_id,
+                    :grade_id,
+                    :day_of_week,
+                    :period_number,
+                    :start_time,
+                    :end_time,
+                    :room,
+                    :status
+                )
+                RETURNING {TIMETABLE_COLUMNS}
+                """
+            ),
+            {
+                "section_id": timetable_data.section_id,
+                "grade_id": timetable_data.grade_id,
+                "day_of_week": timetable_data.day_of_week,
+                "period_number": timetable_data.period_number,
+                "start_time": timetable_data.start_time,
+                "end_time": timetable_data.end_time,
+                "room": timetable_data.room,
+                "status": timetable_data.status,
+            },
+        ).mappings().first()
+
+        db.commit()
+
+        return dict(row)
+
+    except IntegrityError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Invalid section/class reference or duplicate period slot",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def get_timetables(
+    grade_id: int | None,
+    section_id: int | None,
+    db: Session,
+):
+    try:
+        rows = db.execute(
+            text(
+                f"""
+                SELECT {TIMETABLE_COLUMNS}
+                FROM timetables
+                WHERE (CAST(:grade_id AS integer) IS NULL
+                       OR grade_id = CAST(:grade_id AS integer))
+                  AND (CAST(:section_id AS integer) IS NULL
+                       OR section_id = CAST(:section_id AS integer))
+                ORDER BY
+                    section_id,
+                    day_of_week,
+                    period_number NULLS LAST,
+                    start_time
+                """
+            ),
+            {
+                "grade_id": grade_id,
+                "section_id": section_id,
+            },
+        ).mappings().all()
+
+        return [dict(row) for row in rows]
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def get_timetable(
+    timetable_id: int,
+    db: Session,
+):
+    row = db.execute(
+        text(
+            f"""
+            SELECT {TIMETABLE_COLUMNS}
+            FROM timetables
+            WHERE id = :timetable_id
+            """
+        ),
+        {
+            "timetable_id": timetable_id,
+        },
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Timetable not found",
+        )
+
+    return dict(row)
+
+
+def update_timetable(
+    timetable_id: int,
+    timetable_data: TimetableUpdate,
+    db: Session,
+):
+    current = db.execute(
+        text(
+            """
+            SELECT
+                section_id,
+                grade_id,
+                day_of_week,
+                start_time,
+                end_time,
+                room,
+                status
+            FROM timetables
+            WHERE id = :timetable_id
+            """
+        ),
+        {
+            "timetable_id": timetable_id,
+        },
+    ).mappings().first()
+
+    if not current:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Timetable not found",
+        )
+
+    values = {
+        "section_id": (
+            timetable_data.section_id
+            if timetable_data.section_id is not None
+            else current["section_id"]
+        ),
+        "grade_id": current["grade_id"],
+        "day_of_week": (
+            timetable_data.day_of_week
+            if timetable_data.day_of_week is not None
+            else current["day_of_week"]
+        ),
+        "start_time": (
+            timetable_data.start_time
+            if timetable_data.start_time is not None
+            else current["start_time"]
+        ),
+        "end_time": (
+            timetable_data.end_time
+            if timetable_data.end_time is not None
+            else current["end_time"]
+        ),
+        "room": (
+            timetable_data.room
+            if timetable_data.room is not None
+            else current["room"]
+        ),
+        "status": (
+            timetable_data.status
+            if timetable_data.status is not None
+            else current["status"]
+        ),
+        "timetable_id": timetable_id,
+    }
+
+    if values["start_time"] >= values["end_time"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Start time must be before end time",
+        )
+
+    conflict = db.execute(
+        text(
+            """
+            SELECT id
+            FROM timetables
+            WHERE section_id = :section_id
+              AND grade_id IS NOT DISTINCT FROM :grade_id
+              AND day_of_week = :day_of_week
+              AND status = 'active'
+              AND id != :timetable_id
+              AND start_time < :end_time
+              AND end_time > :start_time
+            LIMIT 1
+            """
+        ),
+        values,
+    ).first()
+
+    if conflict:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This section already has a timetable entry during this time",
+        )
+
+    try:
+        row = db.execute(
+            text(
+                f"""
+                UPDATE timetables
+                SET
+                    section_id = :section_id,
+                    day_of_week = :day_of_week,
+                    start_time = :start_time,
+                    end_time = :end_time,
+                    room = :room,
+                    status = :status
+                WHERE id = :timetable_id
+                RETURNING {TIMETABLE_COLUMNS}
+                """
+            ),
+            values,
+        ).mappings().first()
+
+        db.commit()
+
+        return dict(row)
+
+    except IntegrityError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Invalid section reference or duplicate period slot",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def delete_timetable(
+    timetable_id: int,
+    db: Session,
+):
+    has_sessions = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM class_sessions
+            WHERE timetable_id = :timetable_id
+            LIMIT 1
+            """
+        ),
+        {
+            "timetable_id": timetable_id,
+        },
+    ).first()
+
+    if has_sessions:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete timetable because class sessions already exist",
+        )
+
+    try:
+        row = db.execute(
+            text(
+                """
+                DELETE FROM timetables
+                WHERE id = :timetable_id
+                RETURNING id
+                """
+            ),
+            {
+                "timetable_id": timetable_id,
+            },
+        ).mappings().first()
+
+        if not row:
+            db.rollback()
+
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Timetable not found",
+            )
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Timetable deleted successfully",
+            "id": row["id"],
+        }
+
+    except HTTPException:
+        raise
+
+    except IntegrityError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete timetable because class sessions already exist",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+# =========================================================
+# CLASS SESSIONS
+# =========================================================
+
+def generate_class_sessions(
+    generate_data: SessionGenerateRequest,
+    db: Session,
+):
+    summary = db.execute(
+        text(
+            """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE default_subject_id IS NOT NULL
+                      AND default_staff_id IS NOT NULL
+                ) AS assigned,
+                MIN(valid_from) AS valid_from,
+                MAX(valid_to) AS valid_to
+            FROM timetables
+            WHERE grade_id = :grade_id
+              AND section_id = :section_id
+              AND status = 'active'
+            """
+        ),
+        {
+            "grade_id": generate_data.grade_id,
+            "section_id": generate_data.section_id,
+        },
+    ).mappings().first()
+
+    if not summary or summary["total"] == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No timetable found for this class and section. Open the timetable first",
+        )
+
+    if summary["assigned"] == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Assign a subject and staff to at least one slot before generating sessions",
+        )
+
+    start_date = generate_data.start_date or summary["valid_from"]
+    end_date = generate_data.end_date or summary["valid_to"]
+
+    if start_date is None or end_date is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Provide start_date and end_date",
+        )
+
+    if end_date < start_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="End date must be on or after start date",
+        )
+
+    if end_date - start_date > timedelta(days=MAX_GENERATE_DAYS):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Date range cannot exceed {MAX_GENERATE_DAYS} days",
+        )
+
+    try:
+        created = _generate_sessions(
+            db,
+            grade_id=generate_data.grade_id,
+            section_id=generate_data.section_id,
+            start_date=start_date,
+            end_date=end_date,
+            skip_dates=list(generate_data.skip_dates),
+        )
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Class sessions generated successfully",
+            "created": created,
+            "assigned_slots": summary["assigned"],
+            "unassigned_slots": summary["total"] - summary["assigned"],
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def create_class_session(
+    session_data: ClassSessionCreate,
+    db: Session,
+):
+    timetable = db.execute(
+        text(
+            """
+            SELECT id
+            FROM timetables
+            WHERE id = :timetable_id
+            """
+        ),
+        {
+            "timetable_id": session_data.timetable_id,
+        },
+    ).first()
+
+    if not timetable:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Timetable not found",
+        )
+
+    subject = db.execute(
+        text(
+            """
+            SELECT id
+            FROM subjects
+            WHERE id = :subject_id
+              AND status = 'active'
+            """
+        ),
+        {"subject_id": session_data.subject_id},
+    ).first()
+
+    if not subject:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subject not found or inactive",
+        )
+
+    staff = db.execute(
+        text(
+            """
+            SELECT id
+            FROM staff
+            WHERE id = :staff_id
+              AND status = 'active'
+            """
+        ),
+        {"staff_id": session_data.staff_id},
+    ).first()
+
+    if not staff:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Staff not found or inactive",
+        )
+
+    try:
+        row = db.execute(
+            text(
+                f"""
+                INSERT INTO class_sessions (
+                    timetable_id,
+                    subject_id,
+                    staff_id,
+                    session_date,
+                    is_conducted,
+                    remarks
+                )
+                VALUES (
+                    :timetable_id,
+                    :subject_id,
+                    :staff_id,
+                    :session_date,
+                    :is_conducted,
+                    :remarks
+                )
+                RETURNING {SESSION_COLUMNS}
+                """
+            ),
+            {
+                "timetable_id": session_data.timetable_id,
+                "subject_id": session_data.subject_id,
+                "staff_id": session_data.staff_id,
+                "session_date": session_data.session_date,
+                "is_conducted": session_data.is_conducted,
+                "remarks": session_data.remarks,
+            },
+        ).mappings().first()
+
+        db.commit()
+
+        return dict(row)
+
+    except IntegrityError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A class session already exists for this timetable and date",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def get_class_sessions(db: Session):
+    try:
+        rows = db.execute(
+            text(
+                f"""
+                SELECT {SESSION_COLUMNS}
+                FROM class_sessions
+                ORDER BY session_date DESC, id DESC
+                """
+            )
+        ).mappings().all()
+
+        return [dict(row) for row in rows]
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def get_sessions_for_class_on_date(
+    grade_id: int,
+    section_id: int,
+    session_date: date,
+    db: Session,
+):
+    day_of_week = session_date.isoweekday()
+
+    try:
+        slots = db.execute(
+            text(
+                f"""
+                SELECT {TIMETABLE_COLUMNS}
+                FROM timetables
+                WHERE grade_id = :grade_id
+                  AND section_id = :section_id
+                  AND status = 'active'
+                  AND day_of_week = :day_of_week
+                  AND (
+                      valid_from IS NULL
+                      OR valid_from <= :session_date
+                  )
+                  AND (
+                      valid_to IS NULL
+                      OR valid_to >= :session_date
+                  )
+                ORDER BY period_number NULLS LAST, start_time
+                """
+            ),
+            {
+                "grade_id": grade_id,
+                "section_id": section_id,
+                "day_of_week": day_of_week,
+                "session_date": session_date,
+            },
+        ).mappings().all()
+
+        sessions = []
+
+        if slots:
+            slot_ids = [slot["id"] for slot in slots]
+
+            db.execute(
+                text(
+                    """
+                    INSERT INTO class_sessions (
+                        timetable_id,
+                        subject_id,
+                        staff_id,
+                        session_date,
+                        is_conducted
+                    )
+                    SELECT
+                        t.id,
+                        t.default_subject_id,
+                        t.default_staff_id,
+                        CAST(:session_date AS date),
+                        FALSE
+                    FROM timetables t
+                    WHERE t.id = ANY(:slot_ids)
+                      AND t.default_subject_id IS NOT NULL
+                      AND t.default_staff_id IS NOT NULL
+                    ON CONFLICT (timetable_id, session_date) DO NOTHING
+                    """
+                ),
+                {
+                    "slot_ids": slot_ids,
+                    "session_date": session_date,
+                },
+            )
+
+            db.commit()
+
+            sessions = db.execute(
+                text(
+                    f"""
+                    SELECT {SESSION_COLUMNS}
+                    FROM class_sessions
+                    WHERE session_date = :session_date
+                      AND timetable_id = ANY(:slot_ids)
+                    """
+                ),
+                {
+                    "slot_ids": slot_ids,
+                    "session_date": session_date,
+                },
+            ).mappings().all()
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+    session_by_timetable = {}
+
+    for session in sessions:
+        session_by_timetable.setdefault(
+            session["timetable_id"],
+            session,
+        )
+
+    periods = []
+
+    for slot in slots:
+        session = session_by_timetable.get(slot["id"])
+
+        periods.append(
+            {
+                "timetable_id": slot["id"],
+                "period_number": slot["period_number"],
+                "day_of_week": slot["day_of_week"],
+                "start_time": slot["start_time"],
+                "end_time": slot["end_time"],
+                "default_subject_id": slot["default_subject_id"],
+                "default_staff_id": slot["default_staff_id"],
+                "session_id": session["id"] if session else None,
+                "subject_id": session["subject_id"] if session else None,
+                "staff_id": session["staff_id"] if session else None,
+                "is_conducted": (
+                    session["is_conducted"]
+                    if session
+                    else False
+                ),
+                "ready": session is not None,
+            }
+        )
+
+    return {
+        "grade_id": grade_id,
+        "section_id": section_id,
+        "session_date": session_date,
+        "day_of_week": day_of_week,
+        "sessions": periods,
+    }
+
+
+def get_class_session(
+    session_id: int,
+    db: Session,
+):
+    row = db.execute(
+        text(
+            f"""
+            SELECT {SESSION_COLUMNS}
+            FROM class_sessions
+            WHERE id = :session_id
+            """
+        ),
+        {
+            "session_id": session_id,
+        },
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Class session not found",
+        )
+
+    return dict(row)
+
+
+def update_class_session(
+    session_id: int,
+    session_data: ClassSessionUpdate,
+    db: Session,
+):
+    payload = {
+        "timetable_id": session_data.timetable_id,
+        "subject_id": session_data.subject_id,
+        "staff_id": session_data.staff_id,
+        "session_date": session_data.session_date,
+        "is_conducted": session_data.is_conducted,
+        "remarks": session_data.remarks,
+        "session_id": session_id,
+    }
+
+    set_clauses = []
+
+    for field_name in [
+        "timetable_id",
+        "subject_id",
+        "staff_id",
+        "session_date",
+        "is_conducted",
+        "remarks",
+    ]:
+        if payload[field_name] is not None:
+            set_clauses.append(
+                f"{field_name} = :{field_name}"
+            )
+
+    if not set_clauses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No session fields were provided for update",
+        )
+
+    try:
+        row = db.execute(
+            text(
+                f"""
+                UPDATE class_sessions
+                SET {', '.join(set_clauses)}
+                WHERE id = :session_id
+                RETURNING {SESSION_COLUMNS}
+                """
+            ),
+            payload,
+        ).mappings().first()
+
+        if not row:
+            db.rollback()
+
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Class session not found",
+            )
+
+        db.commit()
+
+        return dict(row)
+
+    except HTTPException:
+        raise
+
+    except IntegrityError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A class session already exists for this timetable and date",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
+def delete_class_session(
+    session_id: int,
+    db: Session,
+):
+    has_attendance = db.execute(
+        text(
+            """
+            SELECT 1
+            FROM attendance
+            WHERE session_id = :session_id
+            LIMIT 1
+            """
+        ),
+        {
+            "session_id": session_id,
+        },
+    ).first()
+
+    if has_attendance:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete session because attendance records exist",
+        )
+
+    try:
+        row = db.execute(
+            text(
+                """
+                DELETE FROM class_sessions
+                WHERE id = :session_id
+                RETURNING id
+                """
+            ),
+            {
+                "session_id": session_id,
+            },
+        ).mappings().first()
+
+        if not row:
+            db.rollback()
+
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Class session not found",
+            )
+
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Class session deleted successfully",
+            "id": row["id"],
+        }
+
+    except HTTPException:
+        raise
+
+    except IntegrityError as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete session because attendance records exist",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
+
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc

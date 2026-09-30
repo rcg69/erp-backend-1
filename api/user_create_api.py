@@ -1,13 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from database import get_db
-from schemas.user_schema import UserCreate, UserResponse
-from security.auth import get_current_user
-from service.password_service import hash_password
 
+from schemas.user_schema import UserCreate, UserResponse
 
 router = APIRouter(prefix="/api/users", tags=["Users"])
 
@@ -35,14 +31,10 @@ def _duplicate_error(exc: Exception) -> HTTPException:
     )
 
 
-def _user_payload(user: UserCreate, role_id: int) -> dict:
-    return {
-        "email": str(user.email).strip().lower(),
-        "username": user.username.strip(),
-        "password_hash": hash_password(user.password),
-        "role_id": role_id,
-        "person_id": user.person_id,
-    }
+router = APIRouter(
+    prefix="/api/users",
+    tags=["Users"]
+)
 
 
 @router.get("", response_model=list[UserResponse])
