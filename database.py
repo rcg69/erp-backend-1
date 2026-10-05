@@ -134,7 +134,7 @@ def ensure_database_schema() -> None:
                     status VARCHAR(20) NOT NULL DEFAULT 'active',
 
                     CONSTRAINT uq_academic_year_grade
-                        UNIQUE (academic_year, grade)
+                        UNIQUE (academic_year, grade, section_id)
                 )
                 """
             )
@@ -175,7 +175,7 @@ def ensure_database_schema() -> None:
 
         if (
             "sections" in existing_tables
-            and {"grade", "academic_year"}.issubset(
+            and {"grade", "academic_year","section_id"}.issubset(
                 legacy_section_columns
             )
         ):
@@ -193,11 +193,11 @@ def ensure_database_schema() -> None:
                     SELECT DISTINCT
                         s.academic_year,
                         s.grade,
-                        NULL,
+                        s.section_id,
                         CAST(NULL AS INTEGER),
                         'active'
                     FROM sections s
-                    ON CONFLICT (academic_year, grade) DO NOTHING
+                    ON CONFLICT (academic_year, grade, section_id) DO NOTHING
                     """
                 )
             )

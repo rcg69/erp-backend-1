@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 class GradeCreate(BaseModel):
     academic_year: str = Field(..., min_length=1, max_length=20)
     grade: str = Field(..., min_length=1, max_length=20)
-    section_id: int | None = None
+    section_id: int = Field(..., gt=0)
     staff_id: int | None = None
     status: str = "active"
 

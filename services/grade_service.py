@@ -6,6 +6,7 @@ from schemas.grade_schema import GradeCreate, GradeUpdate
 
 
 def create_grade(grade_data: GradeCreate, db: Session):
+    print("RUNNING:", __file__, grade_data.model_dump(), db.bind.url.render_as_string(hide_password=True))
     try:
         record = db.execute(
             text(
@@ -24,7 +25,7 @@ def create_grade(grade_data: GradeCreate, db: Session):
                     :staff_id,
                     :status
                 )
-                ON CONFLICT (academic_year, grade) DO NOTHING
+                ON CONFLICT (academic_year, grade, section_id) DO NOTHING
                 RETURNING id, academic_year, grade, section_id, staff_id, status
                 """
             ),
@@ -41,12 +42,10 @@ def create_grade(grade_data: GradeCreate, db: Session):
 
         if not record:
             raise HTTPException(
-                status_code=409,
-                detail="Grade already exists for this academic year"
-            )
-
-        return dict(record)
-
+        status_code=409,
+        detail=f"Grade {grade_data.grade} already exists for section_id {grade_data.section_id} in {grade_data.academic_year}"
+        )
+    
     except HTTPException:
         db.rollback()
         raise

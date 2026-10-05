@@ -14,7 +14,7 @@ class Grade(Base):
     status = Column(String(20), nullable=False, default="active")
 
     __table_args__ = (
-        UniqueConstraint("academic_year", "grade", name="uq_academic_year_grade"),
+        UniqueConstraint("academic_year", "grade","section_id" ,name="uq_academic_year_grade"),
     )
 
 
