@@ -5,12 +5,11 @@ from sqlalchemy.orm import Session
 from schemas.grade_schema import GradeCreate, GradeUpdate
 
 
+
 def create_grade(grade_data: GradeCreate, db: Session):
-    print("RUNNING:", __file__, grade_data.model_dump(), db.bind.url.render_as_string(hide_password=True))
     try:
         record = db.execute(
-            text(
-                """
+            text("""
                 INSERT INTO grades (
                     academic_year,
                     grade,
@@ -25,10 +24,12 @@ def create_grade(grade_data: GradeCreate, db: Session):
                     :staff_id,
                     :status
                 )
-                ON CONFLICT (academic_year, grade, section_id) DO NOTHING
-                RETURNING id, academic_year, grade, section_id, staff_id, status
-                """
-            ),
+                ON CONFLICT (academic_year, grade, section_id)
+                DO NOTHING
+                RETURNING
+                    id, academic_year, grade,
+                    section_id, staff_id, status
+            """),
             {
                 "academic_year": grade_data.academic_year,
                 "grade": grade_data.grade,
@@ -38,16 +39,17 @@ def create_grade(grade_data: GradeCreate, db: Session):
             },
         ).mappings().first()
 
-        db.commit()
-
         if not record:
+            db.rollback()
             raise HTTPException(
-        status_code=409,
-        detail=f"Grade {grade_data.grade} already exists for section_id {grade_data.section_id} in {grade_data.academic_year}"
-        )
-    
+                status_code=409,
+                detail="This grade already exists for this section and academic year"
+            )
+
+        db.commit()
+        return dict(record)
+
     except HTTPException:
-        db.rollback()
         raise
 
     except Exception as exc:
