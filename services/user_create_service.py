@@ -41,6 +41,21 @@ def _user_payload(user: UserCreate, role_id: int) -> dict:
     }
 
 
+def _validate_person_for_role(db: Session, role_name: str, person_id: int) -> None:
+    entity_name = "staff" if role_name in {"staff", "teacher"} else "students"
+    person = db.execute(
+        text(f"SELECT id FROM {entity_name} WHERE id = :person_id LIMIT 1"),
+        {"person_id": person_id},
+    ).first()
+
+    if not person:
+        if entity_name == "staff":
+            detail = "person_id must reference an existing staff member"
+        else:
+            detail = "person_id must reference an existing student"
+        raise HTTPException(status_code=422, detail=detail)
+
+
 def get_users(db: Session):
     try:
         users = db.execute(
@@ -107,21 +122,11 @@ def create_user(user: UserCreate, db: Session):
                 detail="Invalid role"
             )
 
-        person = db.execute(
-            text(
-                "SELECT id "
-                "FROM students "
-                "WHERE id = :person_id "
-                "LIMIT 1"
-            ),
-            {"person_id": user.person_id},
-        ).first()
-
-        if not person:
-            raise HTTPException(
-                status_code=422,
-                detail="person_id must reference an existing student"
-            )
+        _validate_person_for_role(
+            db,
+            user.role.strip().lower(),
+            user.person_id,
+        )
 
         payload = _user_payload(user, role["role_id"])
 
@@ -224,21 +229,11 @@ def update_user(user_id: int, user: UserCreate, db: Session):
                 detail="Invalid role"
             )
 
-        person = db.execute(
-            text(
-                "SELECT id "
-                "FROM students "
-                "WHERE id = :person_id "
-                "LIMIT 1"
-            ),
-            {"person_id": user.person_id},
-        ).first()
-
-        if not person:
-            raise HTTPException(
-                status_code=422,
-                detail="person_id must reference an existing student"
-            )
+        _validate_person_for_role(
+            db,
+            user.role.strip().lower(),
+            user.person_id,
+        )
 
         payload = _user_payload(user, role["role_id"])
 

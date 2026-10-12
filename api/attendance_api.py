@@ -15,7 +15,11 @@ from schemas.attendance_schema import (
     AttendanceUpdate,
     ClassRosterResponse,
     StudentAttendanceReport,
+    TeacherAttendanceBulkCreate,
+    TeacherClassSessionsResponse,
 )
+from security.auth import require_admin, require_staff
+from services import attendance_service
 
 
 router = APIRouter(
@@ -159,6 +163,7 @@ def _roll_sort_key(student):
 )
 def create_attendance(
     attendance_data: AttendanceCreate,
+    _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     # Verify session exists and load its section
@@ -581,6 +586,60 @@ def get_student_attendance_report(
 
 
 # =========================================================
+# TEACHER CLASS SESSIONS AND ATTENDANCE
+# =========================================================
+
+@router.get(
+    "/teacher/classes",
+    response_model=TeacherClassSessionsResponse,
+)
+def get_teacher_class_sessions(
+    session_date: date | None = Query(default=None),
+    current_user=Depends(require_staff),
+    db: Session = Depends(get_db),
+):
+    requested_date = session_date or date.today()
+    return attendance_service.get_teacher_class_sessions(
+        requested_date,
+        current_user["person_id"],
+        db,
+    )
+
+
+@router.get(
+    "/teacher/sessions/{session_id}/roster",
+    response_model=ClassRosterResponse,
+)
+def get_teacher_class_roster(
+    session_id: int,
+    current_user=Depends(require_staff),
+    db: Session = Depends(get_db),
+):
+    return attendance_service.get_teacher_class_roster(
+        session_id,
+        current_user["person_id"],
+        db,
+    )
+
+
+@router.put(
+    "/teacher/sessions/{session_id}/attendance",
+)
+def save_teacher_class_attendance(
+    session_id: int,
+    attendance_data: TeacherAttendanceBulkCreate,
+    current_user=Depends(require_staff),
+    db: Session = Depends(get_db),
+):
+    return attendance_service.save_teacher_class_attendance(
+        session_id,
+        current_user["person_id"],
+        attendance_data,
+        db,
+    )
+
+
+# =========================================================
 # GET SINGLE ATTENDANCE
 # =========================================================
 
@@ -630,6 +689,7 @@ def get_attendance_record(
 def update_attendance(
     attendance_id: int,
     attendance_data: AttendanceUpdate,
+    _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     payload = {
@@ -706,6 +766,7 @@ def update_attendance(
 )
 def delete_attendance(
     attendance_id: int,
+    _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     try:
@@ -760,6 +821,7 @@ def delete_attendance(
 )
 def create_bulk_attendance(
     attendance_data: AttendanceBulkCreate,
+    _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     if not attendance_data.records:

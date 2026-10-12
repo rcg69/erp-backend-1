@@ -39,6 +39,32 @@ class AttendanceBulkCreate(BaseModel):
     records: list[AttendanceBulkItem]
 
 
+class TeacherAttendanceBulkCreate(BaseModel):
+    records: list[AttendanceBulkItem] = Field(min_length=1)
+
+
+class TeacherClassSession(BaseModel):
+    session_id: int
+    timetable_id: int
+    session_date: date
+    grade_id: int | None = None
+    section_id: int
+    grade: str | None = None
+    section: str
+    subject_id: int
+    subject_name: str
+    period_number: int | None = None
+    start_time: time
+    end_time: time
+    room: str | None = None
+    is_conducted: bool
+
+
+class TeacherClassSessionsResponse(BaseModel):
+    session_date: date
+    classes: list[TeacherClassSession]
+
+
 class RosterStudent(BaseModel):
     id: int
     name: str | None = None

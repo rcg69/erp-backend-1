@@ -21,6 +21,9 @@ Authorization: Bearer <access_token>
 | POST | `/api/auth/refresh` | Refresh cookie | Rotate the refresh token and receive a new access token |
 | POST | `/api/auth/logout` | Refresh cookie | Revoke the refresh token and clear the cookie |
 | GET | `/api/auth/me` | Authenticated | Load the current signed-in user |
+| GET | `/api/attendance/teacher/classes` | Staff only | Get the signed-in teacher's assigned classes for a date |
+| GET | `/api/attendance/teacher/sessions/{session_id}/roster` | Staff only | Load the class roster and existing attendance |
+| PUT | `/api/attendance/teacher/sessions/{session_id}/attendance` | Assigned staff only | Save or update attendance for that class session |
 | GET | `/api/students` | Authenticated | List all students |
 | GET | `/api/students/{student_id}` | Authenticated | View one student |
 | POST | `/api/students` | Admin only | Create a student |
@@ -270,7 +273,7 @@ The request body for `POST /api/users` and `PUT /api/users/{user_id}` is:
 }
 ```
 
-`person_id` is required when creating or updating a user and must equal an existing student's `id`. For example, if Ram is student `id = 1`, create his user with `person_id: 1`. The user's own `id` is generated separately; the student link is stored in `person_id`.
+`person_id` is required when creating or updating a user. For a `student` account it must equal an existing student's `id`; for a `staff` account it must equal an existing staff member's `id`. The user's own `id` is generated separately; the linked student or staff ID is stored in `person_id`.
 
 Validation rules:
 
@@ -278,7 +281,7 @@ Validation rules:
 - `password` must contain 8 to 128 characters.
 - `username` must contain 3 to 50 characters and only letters, numbers, `_`, `.`, or `-`.
 - `role` is required and must match a role in the database, such as `admin` or `student`.
-- `person_id` is optional and numeric.
+- `person_id` is required and numeric. It must reference a student for student accounts or staff member for staff accounts.
 
 ### `GET /api/users`
 
@@ -370,3 +373,69 @@ const data = await response.json();
 For JSON `POST` and `PUT` requests, also send `Content-Type: application/json` and serialize the request body with `JSON.stringify(...)`.
 
 When a protected request returns `401`, call `/api/auth/refresh` with `credentials: "include"`, replace the stored access token with the returned `access_token`, and retry the original request once. If refresh also returns `401`, clear the access token and redirect to login.
+
+## Teacher attendance
+
+Teacher attendance requests require a valid access token for a `staff` account. The account's `person_id` must be the ID of an active row in `staff`. When creating or updating a staff user, use the staff record's ID for `person_id`.
+
+### `GET /api/attendance/teacher/classes`
+
+Returns only class sessions assigned to the signed-in staff member. `session_date` is optional and uses `YYYY-MM-DD`; when omitted, the backend uses its current date. A dated session is created from the weekly timetable assignment when one does not exist yet.
+
+Example:
+
+```http
+GET /api/attendance/teacher/classes?session_date=2026-10-12
+Authorization: Bearer <access-token>
+```
+
+Response:
+
+```json
+{
+  "session_date": "2026-10-12",
+  "classes": [
+    {
+      "session_id": 42,
+      "timetable_id": 8,
+      "session_date": "2026-10-12",
+      "grade_id": 3,
+      "section_id": 1,
+      "grade": "10",
+      "section": "A",
+      "subject_id": 5,
+      "subject_name": "Mathematics",
+      "period_number": 1,
+      "start_time": "09:00:00",
+      "end_time": "09:50:00",
+      "room": "101",
+      "is_conducted": false
+    }
+  ]
+}
+```
+
+### `GET /api/attendance/teacher/sessions/{session_id}/roster`
+
+Loads the student roster and existing attendance for an assigned class session. A session belonging to another staff member is not accessible through this route.
+
+The response contains `session_id`, class and date details, `total_students`, `marked_students`, and `students`. Each student has `id`, `name`, `roll_number`, and the current `attendance_id`, `status`, and `remarks` (null when not yet marked).
+
+### `PUT /api/attendance/teacher/sessions/{session_id}/attendance`
+
+Saves attendance for the specified assigned session. The session ID comes from the class selected in the first endpoint; do not send a session ID in the request body. Submit one record per student to be marked:
+
+```json
+{
+  "records": [
+    { "student_id": 101, "status": "PRESENT", "remarks": null },
+    { "student_id": 102, "status": "ABSENT", "remarks": "Not present" }
+  ]
+}
+```
+
+Allowed statuses are `PRESENT`, `ABSENT`, `LATE`, and `EXCUSED`. Re-sending a student updates their existing attendance record, so the frontend can retry or correct a mark without creating duplicates. The backend rejects duplicate student IDs in one request and students who do not belong to the selected class. Saving attendance marks the class session as conducted.
+
+The legacy attendance create, bulk-create, update, and delete routes are administrator-only. Teachers should use the assigned-class routes above.
+
+When creating or updating users, `person_id` must reference an existing student for student accounts or an existing staff record for `staff` accounts.

@@ -1,3 +1,4 @@
+from collections import Counter
 import re
 
 from fastapi import HTTPException
@@ -9,6 +10,7 @@ from schemas.attendance_schema import (
     AttendanceBulkCreate,
     AttendanceCreate,
     AttendanceUpdate,
+    TeacherAttendanceBulkCreate,
 )
 
 
@@ -858,6 +860,305 @@ def create_bulk_attendance(
     except Exception as exc:
         db.rollback()
 
+        raise HTTPException(
+            status_code=503,
+            detail="Attendance service unavailable",
+        ) from exc
+
+
+def get_teacher_class_sessions(
+    session_date: date,
+    staff_id: int,
+    db: Session,
+):
+    try:
+        db.execute(
+            text(
+                """
+                INSERT INTO class_sessions (
+                    timetable_id,
+                    subject_id,
+                    staff_id,
+                    session_date,
+                    is_conducted
+                )
+                SELECT
+                    t.id,
+                    t.default_subject_id,
+                    t.default_staff_id,
+                    :session_date,
+                    FALSE
+                FROM timetables t
+                WHERE t.default_staff_id = :staff_id
+                  AND t.default_subject_id IS NOT NULL
+                  AND t.status = 'active'
+                  AND t.day_of_week = :day_of_week
+                  AND (t.valid_from IS NULL OR t.valid_from <= :session_date)
+                  AND (t.valid_to IS NULL OR t.valid_to >= :session_date)
+                ON CONFLICT (timetable_id, session_date) DO NOTHING
+                """
+            ),
+            {
+                "session_date": session_date,
+                "staff_id": staff_id,
+                "day_of_week": session_date.isoweekday(),
+            },
+        )
+        db.commit()
+
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    cs.id AS session_id,
+                    cs.timetable_id,
+                    cs.session_date,
+                    t.grade_id,
+                    t.section_id,
+                    g.grade,
+                    sec.section,
+                    cs.subject_id,
+                    sub.name AS subject_name,
+                    t.period_number,
+                    t.start_time,
+                    t.end_time,
+                    t.room,
+                    cs.is_conducted
+                FROM class_sessions cs
+                JOIN timetables t ON t.id = cs.timetable_id
+                LEFT JOIN grades g ON g.id = t.grade_id
+                JOIN sections sec ON sec.id = t.section_id
+                JOIN subjects sub ON sub.id = cs.subject_id
+                WHERE cs.staff_id = :staff_id
+                  AND cs.session_date = :session_date
+                ORDER BY t.period_number NULLS LAST, t.start_time, cs.id
+                """
+            ),
+            {
+                "staff_id": staff_id,
+                "session_date": session_date,
+            },
+        ).mappings().all()
+
+        return {
+            "session_date": session_date,
+            "classes": [dict(row) for row in rows],
+        }
+
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Attendance service unavailable",
+        ) from exc
+
+
+def _get_teacher_session_context(
+    db: Session,
+    session_id: int,
+    staff_id: int,
+):
+    row = db.execute(
+        text(
+            """
+            SELECT
+                cs.id,
+                cs.staff_id,
+                cs.session_date,
+                t.grade_id,
+                t.section_id,
+                g.grade,
+                sec.section
+            FROM class_sessions cs
+            JOIN timetables t ON t.id = cs.timetable_id
+            LEFT JOIN grades g ON g.id = t.grade_id
+            JOIN sections sec ON sec.id = t.section_id
+            WHERE cs.id = :session_id
+              AND cs.staff_id = :staff_id
+            """
+        ),
+        {
+            "session_id": session_id,
+            "staff_id": staff_id,
+        },
+    ).mappings().first()
+
+    if not row:
+        raise HTTPException(
+            status_code=404,
+            detail="Class session not found or not assigned to this staff member",
+        )
+
+    return row
+
+
+def get_teacher_class_roster(
+    session_id: int,
+    staff_id: int,
+    db: Session,
+):
+    try:
+        context = _get_teacher_session_context(db, session_id, staff_id)
+        student_rows = db.execute(
+            text(
+                """
+                SELECT id, name, roll_number, section, grade
+                FROM students
+                WHERE LOWER(TRIM(COALESCE(section, ''))) =
+                      LOWER(TRIM(:section))
+                """
+            ),
+            {"section": context["section"] or ""},
+        ).mappings().all()
+        students = [
+            student
+            for student in student_rows
+            if _student_in_session_class(student, context)
+        ]
+        students.sort(key=_roll_sort_key)
+
+        attendance_rows = db.execute(
+            text(
+                """
+                SELECT id, student_id, status, remarks
+                FROM attendance
+                WHERE session_id = :session_id
+                """
+            ),
+            {"session_id": session_id},
+        ).mappings().all()
+        attendance_by_student = {
+            row["student_id"]: row for row in attendance_rows
+        }
+
+        roster = []
+        for student in students:
+            record = attendance_by_student.get(student["id"])
+            roster.append(
+                {
+                    "id": student["id"],
+                    "name": student["name"],
+                    "roll_number": student["roll_number"],
+                    "attendance_id": record["id"] if record else None,
+                    "status": record["status"] if record else None,
+                    "remarks": record["remarks"] if record else None,
+                }
+            )
+
+        return {
+            "grade_id": context["grade_id"],
+            "section_id": context["section_id"],
+            "grade": context["grade"],
+            "section": context["section"],
+            "session_date": context["session_date"],
+            "session_id": session_id,
+            "total_students": len(roster),
+            "marked_students": len(attendance_by_student),
+            "students": roster,
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Attendance service unavailable",
+        ) from exc
+
+
+def save_teacher_class_attendance(
+    session_id: int,
+    staff_id: int,
+    attendance_data: TeacherAttendanceBulkCreate,
+    db: Session,
+):
+    student_ids = [record.student_id for record in attendance_data.records]
+    duplicates = sorted(
+        {
+            student_id
+            for student_id, count in Counter(student_ids).items()
+            if count > 1
+        }
+    )
+    if duplicates:
+        raise HTTPException(
+            status_code=400,
+            detail="Duplicate student in attendance records: "
+            + ", ".join(str(student_id) for student_id in duplicates),
+        )
+
+    try:
+        context = _get_teacher_session_context(db, session_id, staff_id)
+        _validate_students_for_session(db, context, student_ids)
+
+        records = []
+        for record in attendance_data.records:
+            row = db.execute(
+                text(
+                    """
+                    INSERT INTO attendance (
+                        session_id,
+                        student_id,
+                        status,
+                        remarks
+                    )
+                    VALUES (
+                        :session_id,
+                        :student_id,
+                        :status,
+                        :remarks
+                    )
+                    ON CONFLICT (session_id, student_id)
+                    DO UPDATE SET
+                        status = EXCLUDED.status,
+                        remarks = EXCLUDED.remarks
+                    RETURNING id, session_id, student_id, status, remarks
+                    """
+                ),
+                {
+                    "session_id": session_id,
+                    "student_id": record.student_id,
+                    "status": record.status,
+                    "remarks": record.remarks,
+                },
+            ).mappings().first()
+            records.append(dict(row))
+
+        db.execute(
+            text(
+                """
+                UPDATE class_sessions
+                SET is_conducted = TRUE
+                WHERE id = :session_id
+                """
+            ),
+            {"session_id": session_id},
+        )
+        db.commit()
+
+        return {
+            "success": True,
+            "message": "Attendance saved successfully",
+            "session_id": session_id,
+            "session_date": context["session_date"],
+            "count": len(records),
+            "records": records,
+        }
+
+    except HTTPException:
+        db.rollback()
+        raise
+
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Attendance could not be saved because of a conflicting record",
+        ) from exc
+
+    except Exception as exc:
+        db.rollback()
         raise HTTPException(
             status_code=503,
             detail="Attendance service unavailable",

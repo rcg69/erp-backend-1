@@ -85,3 +85,50 @@ def require_admin(
 
     current_user["role"] = role_name
     return current_user
+
+
+def require_staff(
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    role_id = current_user.get("role_id")
+    if role_id is None:
+        raise HTTPException(status_code=403, detail="User has no role assigned")
+
+    try:
+        role = db.execute(
+            text("SELECT role_name FROM roles WHERE role_id = :role_id LIMIT 1"),
+            {"role_id": role_id},
+        ).mappings().first()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Authorization service unavailable") from exc
+
+    role_name = str(role.get("role_name", "")).strip().lower() if role else ""
+    if role_name not in {"staff", "teacher"}:
+        raise HTTPException(status_code=403, detail="Staff access required")
+
+    person_id = current_user.get("person_id")
+    if person_id is None:
+        raise HTTPException(status_code=403, detail="User is not linked to a staff profile")
+
+    try:
+        staff = db.execute(
+            text(
+                """
+                SELECT id
+                FROM staff
+                WHERE id = :staff_id
+                  AND LOWER(status) = 'active'
+                LIMIT 1
+                """
+            ),
+            {"staff_id": person_id},
+        ).first()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Authorization service unavailable") from exc
+
+    if not staff:
+        raise HTTPException(status_code=403, detail="Staff profile is missing or inactive")
+
+    current_user["role"] = "staff"
+    return current_user
