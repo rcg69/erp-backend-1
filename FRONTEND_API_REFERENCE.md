@@ -6,7 +6,7 @@ Backend base URL during local development:
 http://127.0.0.1:8000
 ```
 
-The API is served by `server.py` and currently exposes 15 endpoints. Unless an endpoint is marked **Public**, send the login token in this header:
+The API is served by `server.py`. Unless an endpoint is marked **Public**, send the login token in this header:
 
 ```http
 Authorization: Bearer <access_token>
@@ -21,6 +21,10 @@ Authorization: Bearer <access_token>
 | POST | `/api/auth/refresh` | Refresh cookie | Rotate the refresh token and receive a new access token |
 | POST | `/api/auth/logout` | Refresh cookie | Revoke the refresh token and clear the cookie |
 | GET | `/api/auth/me` | Authenticated | Load the current signed-in user |
+| GET | `/api/user-details/me` | Authenticated | Load the signed-in user's personal profile |
+| PATCH | `/api/user-details/me` | Authenticated | Update the signed-in user's profile |
+| GET | `/api/user-details/{user_id}` | Admin only | Load a user's profile |
+| PATCH | `/api/user-details/{user_id}` | Admin only | Update a user's profile |
 | GET | `/api/attendance/teacher/classes` | Staff only | Get the signed-in teacher's assigned classes for a date |
 | GET | `/api/attendance/teacher/sessions/{session_id}/roster` | Staff only | Load the class roster and existing attendance |
 | PUT | `/api/attendance/teacher/sessions/{session_id}/attendance` | Assigned staff only | Save or update attendance for that class session |
@@ -144,6 +148,42 @@ Response:
   "is_active": true
 }
 ```
+
+## User Details
+
+A profile row is created automatically with each account, and existing accounts receive a blank profile during database startup migration. Profile fields can be completed and edited after login without changing the user's login credentials or role.
+
+### `GET /api/user-details/me`
+
+Returns the signed-in user's profile. All fields start as `null` except `same_as_present_address`, which starts as `false`. Requires authentication.
+
+### `PATCH /api/user-details/me`
+
+Updates only the supplied fields; omitted fields remain unchanged. Every personal, contact, family/guardian, and present/permanent address field can be supplied. For example:
+
+```json
+{
+  "full_name": "Rahul Kumar",
+  "gender": "Male",
+  "date_of_birth": "2008-03-12",
+  "nationality": "Indian",
+  "mobile_number": "9876543210",
+  "present_house_flat_number": "12-A",
+  "present_street_locality": "Main Road",
+  "present_village_town_city": "Hyderabad",
+  "present_district": "Hyderabad",
+  "present_state": "Telangana",
+  "present_pin_code": "500001",
+  "present_country": "India",
+  "same_as_present_address": true
+}
+```
+
+When `same_as_present_address` is `true`, the permanent address is copied from the present address and stays synchronized when present-address fields are updated. Set it to `false` to edit permanent-address fields independently. Aadhaar is optional; collect it only when required.
+
+### Admin profile access
+
+Administrators can use `GET /api/user-details/{user_id}` to fetch and `PATCH /api/user-details/{user_id}` to edit any user's profile. Both require an administrator account. The self-service endpoints always use the authenticated user's ID and do not accept a user ID from the request.
 
 ## Students
 

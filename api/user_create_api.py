@@ -268,6 +268,18 @@ def create_user(
             payload,
         ).mappings().first()
 
+        if created:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO user_details (user_id)
+                    VALUES (:user_id)
+                    ON CONFLICT (user_id) DO NOTHING
+                    """
+                ),
+                {"user_id": created["id"]},
+            )
+
         db.commit()
 
         if not created:

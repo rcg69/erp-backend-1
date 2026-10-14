@@ -9,6 +9,7 @@ from api.sections_api import router as sections_router
 from api.staff_api import router as staff_router
 from api.student_api import router as student_router
 from api.user_create_api import router as user_create_router
+from api.user_details_api import router as user_details_router
 from database import ensure_database_schema
 from api.subject_api import router as subject_router
 app = FastAPI(
@@ -45,6 +46,7 @@ app.include_router(sections_router)
 app.include_router(student_router)
 app.include_router(staff_router)
 app.include_router(user_create_router)
+app.include_router(user_details_router)
 app.include_router(auth_router)
 app.include_router(roles_router)
 app.include_router(subject_router)

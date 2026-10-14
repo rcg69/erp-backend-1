@@ -16,15 +16,32 @@ class DatabaseBootstrapTests(unittest.TestCase):
 
         self.assertIn("grades", inspector.get_table_names())
         self.assertIn("sections", inspector.get_table_names())
+        self.assertIn("user_details", inspector.get_table_names())
 
         grade_columns = {column["name"] for column in inspector.get_columns("grades")}
         section_columns = {column["name"] for column in inspector.get_columns("sections")}
         student_columns = {column["name"] for column in inspector.get_columns("students")}
+        user_details_columns = {
+            column["name"] for column in inspector.get_columns("user_details")
+        }
 
         self.assertTrue({"academic_year", "grade", "status", "section_id", "staff_id"}.issubset(grade_columns))
         self.assertTrue({"section"}.issubset(section_columns))
         self.assertFalse("staff_id" in section_columns)
         self.assertTrue({"grade", "section"}.issubset(student_columns))
+        self.assertTrue(
+            {
+                "user_id",
+                "full_name",
+                "date_of_birth",
+                "aadhaar_number",
+                "mobile_number",
+                "annual_family_income",
+                "present_country",
+                "same_as_present_address",
+                "permanent_country",
+            }.issubset(user_details_columns)
+        )
 
     def test_database_bootstrap_creates_staff_table(self):
         database.ensure_database_schema()

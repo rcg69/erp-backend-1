@@ -28,11 +28,12 @@ def main() -> None:
         if existing_admin:
             raise SystemExit("An admin already exists; refusing to create another bootstrap admin")
 
-        db.execute(
+        created_user_id = db.execute(
             text(
                 """
                 INSERT INTO users (email, username, password_hash, role_id, is_active)
                 VALUES (:email, :username, :password_hash, :role_id, TRUE)
+                RETURNING id
                 """
             ),
             {
@@ -41,6 +42,16 @@ def main() -> None:
                 "password_hash": hash_password(password),
                 "role_id": role["role_id"],
             },
+        ).scalar_one()
+        db.execute(
+            text(
+                """
+                INSERT INTO user_details (user_id)
+                VALUES (:user_id)
+                ON CONFLICT (user_id) DO NOTHING
+                """
+            ),
+            {"user_id": created_user_id},
         )
         db.commit()
         print("Admin user created successfully")

@@ -114,6 +114,72 @@ def ensure_database_schema() -> None:
         )
 
         # =========================================================
+        # USER DETAILS
+        # =========================================================
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS user_details (
+                    user_id INTEGER PRIMARY KEY
+                        REFERENCES users(id)
+                        ON DELETE CASCADE,
+                    full_name VARCHAR(150),
+                    gender VARCHAR(30),
+                    date_of_birth DATE,
+                    nationality VARCHAR(100),
+                    mother_tongue VARCHAR(100),
+                    religion VARCHAR(100),
+                    caste_category VARCHAR(100),
+                    aadhaar_number VARCHAR(20),
+                    identification_mark_1 VARCHAR(255),
+                    identification_mark_2 VARCHAR(255),
+                    mobile_number VARCHAR(30),
+                    alternate_mobile_number VARCHAR(30),
+                    email_address VARCHAR(255),
+                    father_name VARCHAR(150),
+                    father_mobile_number VARCHAR(30),
+                    father_occupation VARCHAR(150),
+                    mother_name VARCHAR(150),
+                    mother_mobile_number VARCHAR(30),
+                    mother_occupation VARCHAR(150),
+                    spouse_guardian_name VARCHAR(150),
+                    spouse_guardian_mobile_number VARCHAR(30),
+                    annual_family_income NUMERIC(12, 2),
+                    present_house_flat_number VARCHAR(100),
+                    present_street_locality VARCHAR(255),
+                    present_village_town_city VARCHAR(150),
+                    present_mandal_sub_district VARCHAR(150),
+                    present_district VARCHAR(150),
+                    present_state VARCHAR(150),
+                    present_pin_code VARCHAR(20),
+                    present_country VARCHAR(100),
+                    same_as_present_address BOOLEAN NOT NULL DEFAULT FALSE,
+                    permanent_house_flat_number VARCHAR(100),
+                    permanent_street_locality VARCHAR(255),
+                    permanent_village_town_city VARCHAR(150),
+                    permanent_mandal_sub_district VARCHAR(150),
+                    permanent_district VARCHAR(150),
+                    permanent_state VARCHAR(150),
+                    permanent_pin_code VARCHAR(20),
+                    permanent_country VARCHAR(100),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                INSERT INTO user_details (user_id)
+                SELECT id FROM users
+                ON CONFLICT (user_id) DO NOTHING
+                """
+            )
+        )
+
+        # =========================================================
         # GRADES
         # =========================================================
 
