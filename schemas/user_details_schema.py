@@ -61,6 +61,7 @@ class UserDetailsResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     user_id: int
+    image_id: int | None = None
     full_name: str | None = None
     gender: str | None = None
     date_of_birth: date | None = None

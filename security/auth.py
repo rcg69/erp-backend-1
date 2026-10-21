@@ -132,3 +132,27 @@ def require_staff(
 
     current_user["role"] = "staff"
     return current_user
+
+
+def require_admin_or_staff(
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    role_id = current_user.get("role_id")
+    if role_id is None:
+        raise HTTPException(status_code=403, detail="User has no role assigned")
+
+    try:
+        role = db.execute(
+            text("SELECT role_name FROM roles WHERE role_id = :role_id LIMIT 1"),
+            {"role_id": role_id},
+        ).mappings().first()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Authorization service unavailable") from exc
+
+    role_name = str(role.get("role_name", "")).strip().lower() if role else ""
+    if role_name == "admin":
+        current_user["role"] = "admin"
+        return current_user
+
+    return require_staff(current_user, db)

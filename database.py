@@ -120,10 +120,30 @@ def ensure_database_schema() -> None:
         connection.execute(
             text(
                 """
+                CREATE TABLE IF NOT EXISTS profile_images (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NOT NULL
+                        REFERENCES users(id)
+                        ON DELETE CASCADE,
+                    filename VARCHAR(255) NOT NULL,
+                    content_type VARCHAR(100) NOT NULL,
+                    image_data BYTEA NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
                 CREATE TABLE IF NOT EXISTS user_details (
                     user_id INTEGER PRIMARY KEY
                         REFERENCES users(id)
                         ON DELETE CASCADE,
+                    image_id INTEGER
+                        REFERENCES profile_images(id)
+                        ON DELETE SET NULL,
                     full_name VARCHAR(150),
                     gender VARCHAR(30),
                     date_of_birth DATE,
@@ -169,12 +189,33 @@ def ensure_database_schema() -> None:
             )
         )
 
+        user_details_columns = {
+            column["name"]
+            for column in inspect(connection).get_columns("user_details")
+        }
+        if "image_id" not in user_details_columns:
+            connection.execute(
+                text(
+                    """
+                    ALTER TABLE user_details
+                    ADD COLUMN image_id INTEGER
+                        REFERENCES profile_images(id)
+                        ON DELETE SET NULL
+                    """
+                )
+            )
+
         connection.execute(
             text(
                 """
                 INSERT INTO user_details (user_id)
-                SELECT id FROM users
-                ON CONFLICT (user_id) DO NOTHING
+                SELECT users.id
+                FROM users
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM user_details
+                    WHERE user_details.user_id = users.id
+                )
                 """
             )
         )

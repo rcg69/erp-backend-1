@@ -3,10 +3,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from schemas.user_details_schema import UserDetailsUpdate
+from services.class_assignment_service import teacher_assigned_to_student_class
 
 
 DETAIL_COLUMNS = (
-    "user_id, full_name, gender, date_of_birth, nationality, mother_tongue, "
+    "user_id, image_id, full_name, gender, date_of_birth, nationality, mother_tongue, "
     "religion, caste_category, aadhaar_number, identification_mark_1, "
     "identification_mark_2, mobile_number, alternate_mobile_number, "
     "email_address, father_name, father_mobile_number, father_occupation, "
@@ -67,8 +68,92 @@ def _get_or_create_details(user_id: int, db: Session) -> dict:
     return dict(details)
 
 
-def get_user_details(user_id: int, db: Session) -> dict:
+def _authorize_user_details_access(
+    user_id: int,
+    current_user: dict,
+    db: Session,
+) -> None:
+    if current_user["id"] == user_id:
+        return
+
+    actor_role = db.execute(
+        text("SELECT role_name FROM roles WHERE role_id = :role_id"),
+        {"role_id": current_user["role_id"]},
+    ).mappings().first()
+    target_user = db.execute(
+        text(
+            """
+            SELECT u.id, u.person_id, LOWER(r.role_name) AS role_name
+            FROM users u
+            JOIN roles r ON r.role_id = u.role_id
+            WHERE u.id = :user_id
+            """
+        ),
+        {"user_id": user_id},
+    ).mappings().first()
+
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    if not actor_role:
+        raise HTTPException(status_code=403, detail="User role not found")
+
+    actor_role_name = str(actor_role["role_name"]).strip().lower()
+    if actor_role_name == "admin":
+        return
+    if actor_role_name not in {"staff", "teacher"}:
+        raise HTTPException(status_code=403, detail="Profile access denied")
+
+    staff = db.execute(
+        text(
+            """
+            SELECT id
+            FROM staff
+            WHERE id = :staff_id
+              AND LOWER(status) = 'active'
+            """
+        ),
+        {"staff_id": current_user.get("person_id")},
+    ).first()
+    if not staff:
+        raise HTTPException(
+            status_code=403,
+            detail="Staff profile is missing or inactive",
+        )
+    if target_user["role_name"] != "student" or target_user["person_id"] is None:
+        raise HTTPException(
+            status_code=403,
+            detail="Staff can only access profiles of students in assigned classes",
+        )
+
+    student = db.execute(
+        text(
+            """
+            SELECT id, grade, section
+            FROM students
+            WHERE id = :student_id
+            """
+        ),
+        {"student_id": target_user["person_id"]},
+    ).mappings().first()
+    if not student or not teacher_assigned_to_student_class(
+        db,
+        current_user["person_id"],
+        student["grade"],
+        student["section"],
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Student is not in a class assigned to this teacher",
+        )
+
+
+def get_user_details(
+    user_id: int,
+    db: Session,
+    current_user: dict,
+) -> dict:
     try:
+        _authorize_user_details_access(user_id, current_user, db)
         details = _get_or_create_details(user_id, db)
         db.commit()
         return details
@@ -87,8 +172,10 @@ def update_user_details(
     user_id: int,
     details_update: UserDetailsUpdate,
     db: Session,
+    current_user: dict,
 ) -> dict:
     try:
+        _authorize_user_details_access(user_id, current_user, db)
         existing = _get_or_create_details(user_id, db)
         updates = details_update.model_dump(exclude_unset=True)
 

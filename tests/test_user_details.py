@@ -1,18 +1,28 @@
 import unittest
 
+from fastapi import HTTPException
+
 from schemas.user_details_schema import UserDetailsUpdate
-from services.user_details_service import PRESENT_ADDRESS_FIELDS, update_user_details
+from services.user_details_service import (
+    PRESENT_ADDRESS_FIELDS,
+    _authorize_user_details_access,
+    update_user_details,
+)
 
 
 class _Result:
-    def __init__(self, row=None):
+    def __init__(self, row=None, rows=None):
         self.row = row
+        self.rows = rows or []
 
     def first(self):
         return self.row
 
     def mappings(self):
         return self
+
+    def all(self):
+        return self.rows
 
 
 class _ProfileSession:
@@ -80,7 +90,7 @@ class UserDetailsTests(unittest.TestCase):
             same_as_present_address=True,
         )
 
-        result = update_user_details(1, details, db)
+        result = update_user_details(1, details, db, {"id": 1})
 
         self.assertEqual(
             db.update_parameters["permanent_street_locality"],
@@ -91,6 +101,75 @@ class UserDetailsTests(unittest.TestCase):
             "Hyderabad",
         )
         self.assertTrue(result["same_as_present_address"])
+
+
+class _AccessSession:
+    def __init__(self, role_name, student, assignments=(), staff_active=True):
+        self.role_name = role_name
+        self.student = student
+        self.assignments = assignments
+        self.staff_active = staff_active
+
+    def execute(self, statement, parameters=None):
+        query = str(statement)
+        if "SELECT role_name FROM roles" in query:
+            return _Result({"role_name": self.role_name})
+        if "FROM users u" in query:
+            return _Result(
+                {"id": 42, "person_id": 501, "role_name": "student"}
+            )
+        if "FROM staff" in query:
+            return _Result((12,) if self.staff_active else None)
+        if "FROM students" in query:
+            return _Result(self.student)
+        if "FROM grades g" in query:
+            return _Result(rows=self.assignments)
+        raise AssertionError(f"Unexpected query: {query}")
+
+
+class UserDetailsAccessTests(unittest.TestCase):
+    def setUp(self):
+        self.teacher = {"id": 8, "role_id": 2, "person_id": 12}
+        self.student = {"id": 501, "grade": "10th Class", "section": "A"}
+
+    def test_assigned_teacher_can_access_student_profile(self):
+        db = _AccessSession(
+            "staff",
+            self.student,
+            [{"grade": "10", "section": "a"}],
+        )
+
+        _authorize_user_details_access(42, self.teacher, db)
+
+    def test_teacher_cannot_access_unassigned_student_profile(self):
+        db = _AccessSession("staff", self.student)
+
+        with self.assertRaises(HTTPException) as raised:
+            _authorize_user_details_access(42, self.teacher, db)
+
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_teacher_cannot_access_profile_if_staff_record_is_inactive(self):
+        db = _AccessSession(
+            "staff",
+            self.student,
+            [{"grade": "10", "section": "A"}],
+            staff_active=False,
+        )
+
+        with self.assertRaises(HTTPException) as raised:
+            _authorize_user_details_access(42, self.teacher, db)
+
+        self.assertEqual(raised.exception.status_code, 403)
+
+    def test_admin_can_access_any_student_profile(self):
+        db = _AccessSession("admin", self.student)
+
+        _authorize_user_details_access(
+            42,
+            {"id": 1, "role_id": 1, "person_id": None},
+            db,
+        )
 
 
 if __name__ == "__main__":

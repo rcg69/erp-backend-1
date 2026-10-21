@@ -23,11 +23,14 @@ Authorization: Bearer <access_token>
 | GET | `/api/auth/me` | Authenticated | Load the current signed-in user |
 | GET | `/api/user-details/me` | Authenticated | Load the signed-in user's personal profile |
 | PATCH | `/api/user-details/me` | Authenticated | Update the signed-in user's profile |
-| GET | `/api/user-details/{user_id}` | Admin only | Load a user's profile |
-| PATCH | `/api/user-details/{user_id}` | Admin only | Update a user's profile |
+| GET | `/api/user-details/{user_id}` | Admin; staff assigned to a student | Load a user's profile |
+| PATCH | `/api/user-details/{user_id}` | Admin; staff assigned to a student | Update a user's profile |
+| PUT | `/api/user-images/users/{user_id}` | Admin; staff updating their own image; assigned teacher updating a student in their assigned class | Upload or replace a profile image |
+| GET | `/api/user-images/{image_id}` | Authenticated | Load an image by its ID |
 | GET | `/api/attendance/teacher/classes` | Staff only | Get the signed-in teacher's assigned classes for a date |
 | GET | `/api/attendance/teacher/sessions/{session_id}/roster` | Staff only | Load the class roster and existing attendance |
 | PUT | `/api/attendance/teacher/sessions/{session_id}/attendance` | Assigned staff only | Save or update attendance for that class session |
+| GET | `/api/classes/students?grade={grade}&section={section}&academic_year={academic_year}` | Admin; staff assigned to that class | Load active students for one class |
 | GET | `/api/students` | Authenticated | List all students |
 | GET | `/api/students/{student_id}` | Authenticated | View one student |
 | POST | `/api/students` | Admin only | Create a student |
@@ -180,12 +183,97 @@ Updates only the supplied fields; omitted fields remain unchanged. Every persona
 ```
 
 When `same_as_present_address` is `true`, the permanent address is copied from the present address and stays synchronized when present-address fields are updated. Set it to `false` to edit permanent-address fields independently. Aadhaar is optional; collect it only when required.
+`image_id` is managed only through the profile-image API; do not include it in profile `PATCH` requests.
 
-### Admin profile access
+### Admin and assigned staff profile access
 
-Administrators can use `GET /api/user-details/{user_id}` to fetch and `PATCH /api/user-details/{user_id}` to edit any user's profile. Both require an administrator account. The self-service endpoints always use the authenticated user's ID and do not accept a user ID from the request.
+Administrators can use `GET /api/user-details/{user_id}` to fetch and `PATCH /api/user-details/{user_id}` to edit any user's profile. Staff/teachers can use these endpoints only for a student whose grade and section are assigned to their active staff profile. The server checks the current assignment on each request; staff cannot access other student profiles or other staff profiles. The self-service endpoints always use the authenticated user's ID and do not accept a user ID from the request.
+
+Profile responses include `image_id` (`null` when no image has been uploaded). The image bytes and metadata are stored separately in `profile_images`; the profile keeps only the current image ID. Uploading a replacement creates a new image record, updates that ID, and deletes the user's previous image records in the same transaction. Image IDs are not reused. There is no image-delete endpoint.
+
+### Profile images
+
+`PUT /api/user-images/users/{user_id}` accepts a multipart form upload with a `file` field. Send the access-token `Authorization: Bearer <access-token>` header. JPEG, PNG, GIF, and WebP are supported, up to 5 MB.
+
+Administrators can change any user's image. Staff/teachers can change their own image and a student's image only when that student's grade and section are assigned to them. Students cannot upload, replace, or delete profile images. Staff and administrators may change their own images.
+
+Successful upload response:
+
+```json
+{
+  "id": 42,
+  "user_id": 17,
+  "filename": "profile.png",
+  "content_type": "image/png",
+  "size_bytes": 24581,
+  "created_at": "2026-10-21T12:00:00Z"
+}
+```
+
+Use the returned `id` as `image_id` in profile state; the same ID is returned by `GET /api/user-details/me` or the authorized user's details endpoint. To display the image, request `GET /api/user-images/{image_id}` with the bearer token. Since an HTML `<img src>` cannot attach this header, fetch it with the authorization header, convert the response to a Blob, and use `URL.createObjectURL(blob)` as the image source. Revoke the object URL when it is no longer needed. After successful upload, refresh the user-details response so the frontend receives its current `image_id`.
+
+Example upload (do not set `Content-Type` manually; the browser adds the multipart boundary):
+
+```js
+const formData = new FormData();
+formData.append("file", selectedFile);
+
+const response = await fetch(`${API_BASE_URL}/api/user-images/users/${userId}`, {
+  method: "PUT",
+  headers: { Authorization: `Bearer ${accessToken}` },
+  body: formData,
+});
+
+if (!response.ok) {
+  throw new Error((await response.json()).detail ?? "Image upload failed");
+}
+
+const uploadedImage = await response.json();
+// Refresh user details; image_id is managed by the server.
+```
+
+An unauthorized role or unassigned class returns `403`; a missing user/image returns `404`; an invalid image returns `400`; a file larger than 5 MB returns `413`.
 
 ## Students
+
+### `GET /api/classes/students`
+
+Returns only active students in the requested active class. The `grade`, `section`, and `academic_year` query parameters are required. Administrators may request any active class; staff may request only a class assigned to their staff profile. This endpoint is intended for class rosters instead of fetching `/api/students` and filtering in the browser.
+
+Example:
+
+```http
+GET /api/classes/students?grade=10&section=A&academic_year=2026-2027
+Authorization: Bearer <access_token>
+```
+
+Response:
+
+```json
+{
+  "academic_year": "2026-2027",
+  "grade": "10",
+  "section": "A",
+  "count": 1,
+  "students": [
+    {
+      "id": 42,
+      "user_id": 71,
+      "name": "Rahul Kumar",
+      "roll_number": "23A91A0502",
+      "admission_date": "2026-06-01",
+      "parent_name": "Parent Name",
+      "mobile_number": "9876543210",
+      "grade": "10",
+      "section": "A",
+      "status": "active",
+      "created_at": "2026-06-01T10:00:00Z"
+    }
+  ]
+}
+```
+
+An inactive or nonexistent class returns `404`; staff requesting a class they are not assigned to receive `403`. The roster includes only students whose status is `active`.
 
 The student request body is used by both create and update operations:
 
@@ -199,7 +287,7 @@ The student request body is used by both create and update operations:
 }
 ```
 
-`name` and `roll_number` are required. `admission_date`, `parent_name`, and `mobile_number` are optional. `admission_date` must use `YYYY-MM-DD` format. A student does not have a `user_id`.
+`name` and `roll_number` are required. `admission_date`, `parent_name`, and `mobile_number` are optional. `admission_date` must use `YYYY-MM-DD` format. In class-roster responses, `user_id` is the linked student login account ID when one exists; use it to open the student profile. The student record's `id` is not interchangeable with `user_id`.
 
 ### `GET /api/students`
 
