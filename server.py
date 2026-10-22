@@ -9,7 +9,7 @@ from api.roles_api import router as roles_router
 from api.sections_api import router as sections_router
 from api.staff_api import router as staff_router
 from api.student_api import router as student_router
-from api.user_create_api import router as user_create_router
+from api.user_api import router as user_create_router
 from api.user_details_api import router as user_details_router
 from api.user_image_api import router as user_image_router
 from database import ensure_database_schema

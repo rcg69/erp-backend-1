@@ -1,47 +1,32 @@
+
+import logging
+
 from fastapi import HTTPException, status
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from models import staff_model
 from schemas.staff_schema import StaffCreate, StaffUpdate
 
 
-STAFF_COLUMNS = "id, name, number, status, created_at"
+logger = logging.getLogger(__name__)
 
 
-def _staff_payload(staff: StaffCreate | StaffUpdate) -> dict:
-    return {
-        "name": staff.name,
-        "number": staff.number,
-        "status": staff.status,
-    }
-
-
-def create_staff(
-    staff: StaffCreate,
-    db: Session,
-):
+def create_staff(staff: StaffCreate, db: Session) -> dict:
     try:
-        created = db.execute(
-            text(
-                f"""
-                INSERT INTO staff (name, number, status)
-                VALUES (:name, :number, :status)
-                RETURNING {STAFF_COLUMNS}
-                """
-            ),
-            _staff_payload(staff),
-        ).mappings().first()
+        created = staff_model.insert_staff(
+            db,
+            staff.model_dump(),
+        )
 
-        db.commit()
-
-        if not created:
+        if created is None:
             raise HTTPException(
-                status_code=502,
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Staff could not be created",
             )
 
-        return dict(created)
+        db.commit()
+        return created
 
     except HTTPException:
         db.rollback()
@@ -49,75 +34,53 @@ def create_staff(
 
     except IntegrityError as exc:
         db.rollback()
-
+        logger.warning("Staff creation violated a database constraint", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Staff number already exists",
         ) from exc
 
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         db.rollback()
-
+        logger.exception("Database error while creating staff")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Staff service unavailable",
+            detail="Staff service temporarily unavailable",
         ) from exc
 
 
-def get_staff(db: Session):
+def get_staff(db: Session) -> list[dict]:
     try:
-        rows = db.execute(
-            text(
-                f"""
-                SELECT {STAFF_COLUMNS}
-                FROM staff
-                ORDER BY id
-                """
-            )
-        ).mappings().all()
+        return staff_model.get_all_staff(db)
 
-        return [dict(row) for row in rows]
-
-    except Exception as exc:
-        print("GET STAFF ERROR:", repr(exc))
-
+    except SQLAlchemyError as exc:
+        logger.exception("Database error while listing staff")
         raise HTTPException(
-            status_code=503,
-            detail=str(exc),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Staff service temporarily unavailable",
         ) from exc
 
 
-def get_one_staff(
-    staff_id: int,
-    db: Session,
-):
+def get_one_staff(staff_id: int, db: Session) -> dict:
     try:
-        row = db.execute(
-            text(
-                f"""
-                SELECT {STAFF_COLUMNS}
-                FROM staff
-                WHERE id = :staff_id
-                """
-            ),
-            {"staff_id": staff_id},
-        ).mappings().first()
+        staff = staff_model.get_staff_by_id(db, staff_id)
 
-        if not row:
+        if staff is None:
             raise HTTPException(
-                status_code=404,
+                status_code=status.HTTP_404_NOT_FOUND,
                 detail="Staff not found",
             )
 
-        return dict(row)
+        return staff
 
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except SQLAlchemyError as exc:
+        logger.exception("Database error while retrieving staff")
         raise HTTPException(
-            status_code=503,
-            detail="Staff service unavailable",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Staff service temporarily unavailable",
         ) from exc
 
 
@@ -125,49 +88,45 @@ def update_staff(
     staff_id: int,
     staff: StaffUpdate,
     db: Session,
-):
-    payload = _staff_payload(staff)
-    update_fields = []
+) -> dict:
+    payload = staff.model_dump(exclude_unset=True)
 
-    for field_name in ["name", "number", "status"]:
-        value = payload[field_name]
-
-        if value is not None:
-            update_fields.append(
-                f"{field_name} = :{field_name}"
-            )
-
-    if not update_fields:
+    if not payload:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="No staff fields were provided for update",
         )
 
-    try:
-        row = db.execute(
-            text(
-                f"""
-                UPDATE staff
-                SET {', '.join(update_fields)}
-                WHERE id = :staff_id
-                RETURNING {STAFF_COLUMNS}
-                """
-            ),
-            {
-                **payload,
-                "staff_id": staff_id,
-            },
-        ).mappings().first()
-
-        db.commit()
-
-        if not row:
+    for field in ("name", "number", "status"):
+        if field in payload and payload[field] is None:
             raise HTTPException(
-                status_code=404,
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"{field} cannot be null",
+            )
+
+    try:
+        existing = staff_model.get_staff_by_id(db, staff_id)
+
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
                 detail="Staff not found",
             )
 
-        return dict(row)
+        updated = staff_model.update_staff_record(
+            db,
+            staff_id,
+            payload,
+        )
+
+        if updated is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No valid staff fields were provided for update",
+            )
+
+        db.commit()
+        return updated
 
     except HTTPException:
         db.rollback()
@@ -175,59 +134,55 @@ def update_staff(
 
     except IntegrityError as exc:
         db.rollback()
-
+        logger.warning("Staff update violated a database constraint", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Staff number already exists",
         ) from exc
 
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         db.rollback()
-
+        logger.exception("Database error while updating staff")
         raise HTTPException(
-            status_code=503,
-            detail="Staff service unavailable",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Staff service temporarily unavailable",
         ) from exc
 
 
-def delete_staff(
-    staff_id: int,
-    db: Session,
-):
+def delete_staff(staff_id: int, db: Session) -> dict:
     try:
-        row = db.execute(
-            text(
-                f"""
-                DELETE FROM staff
-                WHERE id = :staff_id
-                RETURNING {STAFF_COLUMNS}
-                """
-            ),
-            {"staff_id": staff_id},
-        ).mappings().first()
+        deleted = staff_model.delete_staff_record(db, staff_id)
 
-        db.commit()
-
-        if not row:
+        if deleted is None:
             raise HTTPException(
-                status_code=404,
+                status_code=status.HTTP_404_NOT_FOUND,
                 detail="Staff not found",
             )
+
+        db.commit()
 
         return {
             "success": True,
             "message": "Staff deleted successfully",
-            "staff": dict(row),
+            "staff": deleted,
         }
 
     except HTTPException:
         db.rollback()
         raise
 
-    except Exception as exc:
+    except IntegrityError as exc:
         db.rollback()
-
+        logger.warning("Staff deletion violated a database constraint", exc_info=True)
         raise HTTPException(
-            status_code=503,
-            detail="Staff service unavailable",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Staff cannot be deleted because related records exist",
+        ) from exc
+
+    except SQLAlchemyError as exc:
+        db.rollback()
+        logger.exception("Database error while deleting staff")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Staff service temporarily unavailable",
         ) from exc

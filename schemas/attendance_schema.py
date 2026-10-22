@@ -1,21 +1,23 @@
+
 from datetime import date, time
 
 from pydantic import BaseModel, Field
 
 
+ATTENDANCE_STATUSES = r"^(PRESENT|ABSENT|LATE|EXCUSED)$"
+
+
 class AttendanceCreate(BaseModel):
     session_id: int
     student_id: int
-    status: str = Field(
-        pattern="^(PRESENT|ABSENT|LATE|EXCUSED)$"
-    )
+    status: str = Field(pattern=ATTENDANCE_STATUSES)
     remarks: str | None = None
 
 
 class AttendanceUpdate(BaseModel):
     status: str | None = Field(
         default=None,
-        pattern="^(PRESENT|ABSENT|LATE|EXCUSED)$"
+        pattern=ATTENDANCE_STATUSES,
     )
     remarks: str | None = None
 
@@ -25,12 +27,12 @@ class AttendanceResponse(BaseModel):
     session_id: int
     student_id: int
     status: str
-    remarks: str | None
+    remarks: str | None = None
+
+
 class AttendanceBulkItem(BaseModel):
     student_id: int
-    status: str = Field(
-        pattern="^(PRESENT|ABSENT|LATE|EXCUSED)$"
-    )
+    status: str = Field(pattern=ATTENDANCE_STATUSES)
     remarks: str | None = None
 
 
@@ -69,8 +71,6 @@ class RosterStudent(BaseModel):
     id: int
     name: str | None = None
     roll_number: str | None = None
-
-    # Filled only when a session_id is supplied and attendance exists.
     attendance_id: int | None = None
     status: str | None = None
     remarks: str | None = None
@@ -86,7 +86,6 @@ class ClassRosterResponse(BaseModel):
     total_students: int
     marked_students: int
     students: list[RosterStudent]
-
 
 
 class ReportStudent(BaseModel):
@@ -112,9 +111,6 @@ class StudentAttendanceItem(BaseModel):
 
 class StudentAttendanceReport(BaseModel):
     student: ReportStudent
-
-    # Classes counted = every class session with an attendance record.
-    # Attended = PRESENT + LATE.
     total_classes: int
     attended_classes: int
     present: int
@@ -122,5 +118,4 @@ class StudentAttendanceReport(BaseModel):
     late: int
     excused: int
     percentage: float
-
     records: list[StudentAttendanceItem]

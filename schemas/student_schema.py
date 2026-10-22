@@ -1,6 +1,7 @@
+
 from datetime import date
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StudentCreate(BaseModel):
@@ -26,6 +27,8 @@ class StudentUpdate(BaseModel):
 
 
 class StudentResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
     id: int
     name: str
     roll_number: str

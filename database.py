@@ -77,7 +77,7 @@ def ensure_database_schema() -> None:
                 CREATE TABLE IF NOT EXISTS students (
                     id SERIAL PRIMARY KEY,
                     name VARCHAR(150) NOT NULL,
-                    roll_number VARCHAR(50) NOT NULL UNIQUE,
+                    roll_number VARCHAR(50) NOT NULL,
                     admission_date DATE NOT NULL,
                     parent_name VARCHAR(150),
                     mobile_number VARCHAR(30),
@@ -89,7 +89,6 @@ def ensure_database_schema() -> None:
                 """
             )
         )
-
         # =========================================================
         # USERS
         # =========================================================
@@ -450,6 +449,117 @@ def ensure_database_schema() -> None:
                 """
                 ALTER TABLE students
                 DROP COLUMN IF EXISTS user_id
+                """
+            )
+        )
+
+        # =========================================================
+        # STUDENT ROLL NUMBER UNIQUENESS MIGRATION
+        # =========================================================
+        # A roll number must be unique within its grade and section.
+        # Existing primary keys and student records are preserved.
+        # =========================================================
+
+        # Stop safely if existing records violate the new rule.
+        connection.execute(
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1
+                        FROM students
+                        GROUP BY
+                            LOWER(TRIM(roll_number)),
+                            LOWER(TRIM(COALESCE(grade, ''))),
+                            LOWER(TRIM(COALESCE(section, '')))
+                        HAVING COUNT(*) > 1
+                    ) THEN
+                        RAISE EXCEPTION
+                            'Student roll-number migration stopped: '
+                            'duplicate roll number, grade and section '
+                            'combinations exist. Resolve duplicates first.';
+                    END IF;
+                END
+                $$;
+                """
+            )
+        )
+
+        # Remove any UNIQUE constraint that applies only to roll_number.
+        # This discovers the real constraint name instead of assuming it.
+        connection.execute(
+            text(
+                """
+                DO $$
+                DECLARE
+                    constraint_record RECORD;
+                BEGIN
+                    FOR constraint_record IN
+                        SELECT c.conname
+                        FROM pg_constraint c
+                        JOIN pg_attribute a
+                          ON a.attrelid = c.conrelid
+                         AND a.attname = 'roll_number'
+                        WHERE c.conrelid = 'students'::regclass
+                          AND c.contype = 'u'
+                          AND c.conkey = ARRAY[a.attnum]::SMALLINT[]
+                    LOOP
+                        EXECUTE format(
+                            'ALTER TABLE students DROP CONSTRAINT %I',
+                            constraint_record.conname
+                        );
+                    END LOOP;
+                END
+                $$;
+                """
+            )
+        )
+
+        # Remove standalone unique indexes that still restrict roll_number.
+        connection.execute(
+            text(
+                """
+                DO $$
+                DECLARE
+                    index_record RECORD;
+                BEGIN
+                    FOR index_record IN
+                        SELECT ns.nspname, idx.relname
+                        FROM pg_index i
+                        JOIN pg_class idx ON idx.oid = i.indexrelid
+                        JOIN pg_namespace ns ON ns.oid = idx.relnamespace
+                        JOIN pg_attribute a
+                          ON a.attrelid = i.indrelid
+                         AND a.attname = 'roll_number'
+                        WHERE i.indrelid = 'students'::regclass
+                          AND i.indisunique
+                          AND i.indnkeyatts = 1
+                          AND i.indkey[0] = a.attnum
+                    LOOP
+                        EXECUTE format(
+                            'DROP INDEX %I.%I',
+                            index_record.nspname,
+                            index_record.relname
+                        );
+                    END LOOP;
+                END
+                $$;
+                """
+            )
+        )
+
+        # Enforce uniqueness across roll number + grade + section.
+        connection.execute(
+            text(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_students_roll_grade_section
+                ON students (
+                    LOWER(TRIM(roll_number)),
+                    LOWER(TRIM(COALESCE(grade, ''))),
+                    LOWER(TRIM(COALESCE(section, '')))
+                )
                 """
             )
         )

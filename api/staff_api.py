@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
@@ -23,10 +24,7 @@ def create_staff(
     _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    return staff_service.create_staff(
-        staff,
-        db,
-    )
+    return staff_service.create_staff(staff, db)
 
 
 @router.get(
@@ -49,10 +47,7 @@ def get_one_staff(
     _current_user=Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    return staff_service.get_one_staff(
-        staff_id,
-        db,
-    )
+    return staff_service.get_one_staff(staff_id, db)
 
 
 @router.put(
@@ -65,11 +60,7 @@ def update_staff(
     _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    return staff_service.update_staff(
-        staff_id,
-        staff,
-        db,
-    )
+    return staff_service.update_staff(staff_id, staff, db)
 
 
 @router.delete("/{staff_id}")
@@ -78,7 +69,4 @@ def delete_staff(
     _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    return staff_service.delete_staff(
-        staff_id,
-        db,
-    )
+    return staff_service.delete_staff(staff_id, db)

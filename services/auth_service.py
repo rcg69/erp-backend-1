@@ -1,16 +1,16 @@
+
+import logging
 import os
-import traceback
 from datetime import datetime, timezone
 
 import jwt
-from fastapi import Cookie, HTTPException, Response
-from sqlalchemy import text
+from fastapi import HTTPException, Response
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from models import auth_model
 from schemas.auth_schema import LoginRequest
-
 from services.password_service import verify_password
-
 from utils.jwt import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     REFRESH_TOKEN_EXPIRE_DAYS,
@@ -21,27 +21,38 @@ from utils.jwt import (
 )
 
 
+logger = logging.getLogger(__name__)
+
 REFRESH_COOKIE_NAME = "refresh_token"
 
-COOKIE_SECURE = os.getenv(
-    "JWT_COOKIE_SECURE",
-    "false"
-).lower() == "true"
+_ENVIRONMENT = os.getenv("ENVIRONMENT", "development").lower()
+_SECURE_SETTING = os.getenv("JWT_COOKIE_SECURE")
+
+COOKIE_SECURE = (
+    _SECURE_SETTING.lower() == "true"
+    if _SECURE_SETTING is not None
+    else _ENVIRONMENT in {"production", "prod"}
+)
 
 COOKIE_SAMESITE = os.getenv(
-    "JWT_COOKIE_SAMESITE",
-    "lax"
-)
+    "JWT_COOKIE_SAMESITE", "lax"
+).lower()
+
+if COOKIE_SAMESITE not in {"lax", "strict", "none"}:
+    raise RuntimeError("Invalid JWT_COOKIE_SAMESITE configuration")
+
+if COOKIE_SAMESITE == "none" and not COOKIE_SECURE:
+    raise RuntimeError("SameSite=None requires secure cookies")
 
 
 def set_refresh_cookie(
     response: Response,
-    refresh_token: str
+    refresh_token: str,
 ) -> None:
     response.set_cookie(
         key=REFRESH_COOKIE_NAME,
         value=refresh_token,
-        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 86400,
         httponly=True,
         secure=COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
@@ -49,78 +60,52 @@ def set_refresh_cookie(
     )
 
 
+def clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
+        path="/api/auth",
+        secure=COOKIE_SECURE,
+        httponly=True,
+        samesite=COOKIE_SAMESITE,
+    )
+
+
 def store_refresh_token(
     db: Session,
     user_id: int,
-    refresh_token: str
+    refresh_token: str,
 ) -> None:
-    payload = decode_token(
-        refresh_token,
-        "refresh"
-    )
+    payload = decode_token(refresh_token, "refresh")
 
     expires_at = datetime.fromtimestamp(
         payload["exp"],
-        tz=timezone.utc
+        tz=timezone.utc,
     )
 
-    db.execute(
-        text(
-            """
-            INSERT INTO refresh_tokens (
-                user_id,
-                token_hash,
-                expires_at
-            )
-            VALUES (
-                :user_id,
-                :token_hash,
-                :expires_at
-            )
-            """
-        ),
-        {
-            "user_id": user_id,
-            "token_hash": hash_refresh_token(refresh_token),
-            "expires_at": expires_at,
-        },
+    auth_model.create_refresh_token_record(
+        db=db,
+        user_id=user_id,
+        token_hash=hash_refresh_token(refresh_token),
+        expires_at=expires_at,
     )
 
 
 def get_active_user(
     db: Session,
-    user_id: int
+    user_id: int,
 ) -> dict:
-    user = db.execute(
-        text(
-            """
-            SELECT
-                id,
-                username,
-                email,
-                person_id,
-                role_id,
-                is_active
-            FROM users
-            WHERE id = :user_id
-            LIMIT 1
-            """
-        ),
-        {"user_id": user_id},
-    ).mappings().first()
+    user = auth_model.get_user_by_id(db, user_id)
 
     if not user:
         raise HTTPException(
             status_code=401,
-            detail="Invalid refresh token"
+            detail="Invalid refresh token",
         )
-
-    user = dict(user)
 
     if not user.get("is_active", False):
         raise HTTPException(
             status_code=403,
-            detail="User account is inactive"
+            detail="User account is inactive",
         )
 
     return user
@@ -129,73 +114,48 @@ def get_active_user(
 def login(
     credentials: LoginRequest,
     response: Response,
-    db: Session
-):
+    db: Session,
+) -> dict:
     email = str(credentials.email).strip().lower()
 
-    print(
-        "[LOGIN] Request received:",
-        {
-            "email": email,
-            "password_provided": bool(credentials.password),
-            "password_length": len(credentials.password),
-        },
-    )
-
     try:
-        user = db.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    username,
-                    email,
-                    person_id,
-                    role_id,
-                    is_active,
-                    password_hash
-                FROM users
-                WHERE email = :email
-                LIMIT 1
-                """
-            ),
-            {"email": email},
-        ).mappings().first()
-
-    except Exception as exc:
-        print(
-            "[LOGIN] Local database lookup failed:",
-            type(exc).__name__,
-            str(exc)
-        )
-        traceback.print_exc()
-
+        user = auth_model.get_user_by_email(db, email)
+    except SQLAlchemyError:
+        db.rollback()
+        logger.error("Login database lookup failed")
         raise HTTPException(
             status_code=503,
-            detail="Authentication service unavailable"
-        ) from exc
-
-    user = dict(user) if user else None
+            detail="Authentication service unavailable",
+        ) from None
 
     if not user or not user.get("password_hash"):
         raise HTTPException(
             status_code=401,
-            detail="Invalid email or password"
+            detail="Invalid email or password",
         )
 
-    if not verify_password(
-        credentials.password,
-        user["password_hash"]
-    ):
+    try:
+        password_valid = verify_password(
+            credentials.password,
+            user["password_hash"],
+        )
+    except Exception:
+        logger.error("Password verification failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication service unavailable",
+        ) from None
+
+    if not password_valid:
         raise HTTPException(
             status_code=401,
-            detail="Invalid email or password"
+            detail="Invalid email or password",
         )
 
     if not user.get("is_active", False):
         raise HTTPException(
             status_code=403,
-            detail="User account is inactive"
+            detail="User account is inactive",
         )
 
     try:
@@ -206,44 +166,27 @@ def login(
         )
 
         refresh_token = create_refresh_token(
-            user_id=user["id"]
+            user_id=user["id"],
         )
 
         store_refresh_token(
             db,
             user["id"],
-            refresh_token
+            refresh_token,
         )
 
         db.commit()
+        set_refresh_cookie(response, refresh_token)
 
-        set_refresh_cookie(
-            response,
-            refresh_token
-        )
-
-    except RuntimeError as exc:
+    except Exception:
         db.rollback()
+        clear_refresh_cookie(response)
+        logger.error("Login token issuance failed")
 
         raise HTTPException(
             status_code=503,
-            detail="Authentication is not configured"
-        ) from exc
-
-    except Exception as exc:
-        db.rollback()
-
-        print(
-            "[LOGIN] Token creation failed:",
-            type(exc).__name__,
-            str(exc)
-        )
-        traceback.print_exc()
-
-        raise HTTPException(
-            status_code=503,
-            detail="Authentication service unavailable"
-        ) from exc
+            detail="Authentication service unavailable",
+        ) from None
 
     return {
         "success": True,
@@ -263,65 +206,45 @@ def login(
 def refresh_access_token(
     response: Response,
     refresh_token: str | None,
-    db: Session
-):
-    token = refresh_token
-
-    if not token:
+    db: Session,
+) -> dict:
+    if not refresh_token:
         raise HTTPException(
             status_code=401,
-            detail="Refresh token is required"
+            detail="Refresh token is required",
         )
 
     try:
-        payload = decode_token(
-            token,
-            "refresh"
-        )
-
+        payload = decode_token(refresh_token, "refresh")
         user_id = int(payload["sub"])
+        token_hash = hash_refresh_token(refresh_token)
 
-        token_hash = hash_refresh_token(token)
-
-        stored = db.execute(
-            text(
-                """
-                SELECT id
-                FROM refresh_tokens
-                WHERE token_hash = :token_hash
-                  AND user_id = :user_id
-                  AND revoked = FALSE
-                  AND expires_at > CURRENT_TIMESTAMP
-                LIMIT 1
-                """
-            ),
-            {
-                "token_hash": token_hash,
-                "user_id": user_id,
-            },
-        ).mappings().first()
+        stored = auth_model.get_valid_refresh_token(
+            db,
+            token_hash,
+            user_id,
+        )
 
         if not stored:
             raise HTTPException(
                 status_code=401,
-                detail="Refresh token has been revoked or expired"
+                detail="Refresh token has been revoked or expired",
             )
 
-        user = get_active_user(
+        user = get_active_user(db, user_id)
+
+        # Atomically revoke the old token to prevent reuse.
+        claimed = auth_model.revoke_refresh_token_by_id(
             db,
-            user_id
+            stored["id"],
         )
 
-        db.execute(
-            text(
-                """
-                UPDATE refresh_tokens
-                SET revoked = TRUE
-                WHERE id = :token_id
-                """
-            ),
-            {"token_id": stored["id"]},
-        )
+        if not claimed:
+            db.rollback()
+            raise HTTPException(
+                status_code=401,
+                detail="Refresh token has already been used",
+            )
 
         new_access_token = create_access_token(
             user_id=user["id"],
@@ -330,21 +253,19 @@ def refresh_access_token(
         )
 
         new_refresh_token = create_refresh_token(
-            user_id=user["id"]
+            user_id=user["id"],
         )
 
         store_refresh_token(
             db,
             user["id"],
-            new_refresh_token
+            new_refresh_token,
         )
 
+        # Commit revocation and replacement together.
         db.commit()
 
-        set_refresh_cookie(
-            response,
-            new_refresh_token
-        )
+        set_refresh_cookie(response, new_refresh_token)
 
         return {
             "access_token": new_access_token,
@@ -361,58 +282,57 @@ def refresh_access_token(
         KeyError,
         TypeError,
         ValueError,
-        RuntimeError,
-    ) as exc:
+    ):
         db.rollback()
-
         raise HTTPException(
             status_code=401,
-            detail="Invalid or expired refresh token"
-        ) from exc
+            detail="Invalid or expired refresh token",
+        ) from None
 
-    except Exception as exc:
+    except SQLAlchemyError:
         db.rollback()
-
-        print(
-            "[AUTH REFRESH] Failed:",
-            type(exc).__name__,
-            str(exc)
-        )
-        traceback.print_exc()
-
+        logger.error("Refresh token database operation failed")
         raise HTTPException(
             status_code=503,
-            detail="Authentication service unavailable"
-        ) from exc
+            detail="Authentication service unavailable",
+        ) from None
+
+    except Exception:
+        db.rollback()
+        logger.error("Refresh token rotation failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication service unavailable",
+        ) from None
 
 
 def logout(
     response: Response,
     refresh_token: str | None,
-    db: Session
-):
-    if refresh_token:
-        db.execute(
-            text(
-                """
-                UPDATE refresh_tokens
-                SET revoked = TRUE
-                WHERE token_hash = :token_hash
-                """
-            ),
-            {
-                "token_hash": hash_refresh_token(refresh_token)
-            },
-        )
+    db: Session,
+) -> dict:
+    try:
+        if refresh_token:
+            auth_model.revoke_refresh_token(
+                db,
+                hash_refresh_token(refresh_token),
+            )
 
         db.commit()
 
-    response.delete_cookie(
-        key=REFRESH_COOKIE_NAME,
-        path="/api/auth"
-    )
+    except Exception:
+        db.rollback()
+        clear_refresh_cookie(response)
+        logger.error("Logout token revocation failed")
+
+        raise HTTPException(
+            status_code=503,
+            detail="Logout could not be completed",
+        ) from None
+
+    clear_refresh_cookie(response)
 
     return {
         "success": True,
-        "message": "Logged out successfully"
+        "message": "Logged out successfully",
     }

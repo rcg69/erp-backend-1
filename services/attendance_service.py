@@ -1,11 +1,14 @@
-from collections import Counter
-import re
 
-from fastapi import HTTPException
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+import logging
+import re
+from collections import Counter
+from datetime import date
+
+from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from models import attendance_model as model
 from schemas.attendance_schema import (
     AttendanceBulkCreate,
     AttendanceCreate,
@@ -14,427 +17,233 @@ from schemas.attendance_schema import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 def _normalize_grade(value):
     if value is None:
         return None
-
     value = str(value).strip().lower()
-
     if not value:
         return None
-
     match = re.search(r"\d+", value)
-
-    if match:
-        return match.group(0)
-
-    return value
+    return match.group(0) if match else value
 
 
-def _get_session_context(
-    db: Session,
-    session_id: int,
-):
-    row = db.execute(
-        text(
-            """
-            SELECT
-                cs.id,
-                s.section,
-                g.grade
-            FROM class_sessions cs
-            JOIN timetables t
-                ON t.id = cs.timetable_id
-            JOIN sections s
-                ON s.id = t.section_id
-            LEFT JOIN grades g
-                ON g.id = t.grade_id
-            WHERE cs.id = :session_id
-            """
-        ),
-        {"session_id": session_id},
-    ).mappings().first()
+def _student_in_class(student, context):
+    student_section = (student.get("section") or "").strip().lower()
+    class_section = (context.get("section") or "").strip().lower()
 
-    if not row:
+    if student_section != class_section:
+        return False
+
+    student_grade = _normalize_grade(student.get("grade"))
+    class_grade = _normalize_grade(context.get("grade"))
+
+    return not (
+        student_grade
+        and class_grade
+        and student_grade != class_grade
+    )
+
+
+def _validate_students(db, context, student_ids):
+    rows = model.get_students_by_ids(db, student_ids)
+    found = {row["id"]: row for row in rows}
+    missing = sorted(set(student_ids) - set(found))
+
+    if missing:
         raise HTTPException(
-            status_code=404,
-            detail="Class session not found",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Student not found: "
+            + ", ".join(map(str, missing)),
         )
 
-    return row
-
-
-def _student_in_session_class(
-    student,
-    context,
-):
-    student_section = (
-        str(student["section"]).strip().lower()
-        if student["section"] is not None
-        else None
-    )
-
-    session_section = (
-        str(context["section"]).strip().lower()
-        if context["section"] is not None
-        else None
-    )
-
-    if student_section != session_section:
-        return False
-
-    student_grade = _normalize_grade(student["grade"])
-    session_grade = _normalize_grade(context["grade"])
-
-    if (
-        student_grade is not None
-        and session_grade is not None
-        and student_grade != session_grade
-    ):
-        return False
-
-    return True
-
-
-def _validate_students_for_session(
-    db: Session,
-    context,
-    student_ids,
-):
-    rows = db.execute(
-        text(
-            """
-            SELECT
-                id,
-                name,
-                roll_number,
-                section,
-                grade
-            FROM students
-            WHERE id = ANY(:student_ids)
-            """
-        ),
-        {"student_ids": student_ids},
-    ).mappings().all()
-
-    found_ids = {row["id"] for row in rows}
-
-    for student_id in student_ids:
-        if student_id not in found_ids:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Student not found: {student_id}",
-            )
-
-    invalid_students = [
-        str(row["id"])
-        for row in rows
-        if not _student_in_session_class(row, context)
+    outside = [
+        student_id
+        for student_id in student_ids
+        if not _student_in_class(found[student_id], context)
     ]
 
-    if invalid_students:
+    if outside:
         raise HTTPException(
-            status_code=400,
-            detail=(
-                "Student(s) not in this session's section: "
-                + ", ".join(invalid_students)
-            ),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Student(s) not in this session's section: "
+            + ", ".join(map(str, outside)),
         )
 
     return rows
 
 
-def _roll_sort_key(student):
-    roll = student["roll_number"]
-
-    if roll is None:
-        return (1, "", student["name"] or "")
-
-    roll_text = str(roll).strip()
-
-    if roll_text.isdigit():
-        return (0, int(roll_text), roll_text)
-
-    return (1, roll_text, student["name"] or "")
+def _require_session(db, session_id):
+    context = model.get_session_context(db, session_id)
+    if context is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Class session not found",
+        )
+    return context
 
 
-def create_attendance(
-    attendance_data: AttendanceCreate,
-    db: Session,
-):
+def _require_teacher_session(db, session_id, staff_id):
+    context = model.get_teacher_session_context(db, session_id, staff_id)
+    if context is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Class session not found or not assigned to this staff member",
+        )
+    return context
+
+
+def _raise_database_error(exc, operation):
+    logger.exception("Database error during attendance %s", operation)
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Attendance service temporarily unavailable",
+    ) from exc
+
+
+def create_attendance(data: AttendanceCreate, db: Session):
     try:
-        context = _get_session_context(
-            db,
-            attendance_data.session_id,
-        )
+        context = _require_session(db, data.session_id)
+        _validate_students(db, context, [data.student_id])
 
-        _validate_students_for_session(
+        record = model.insert_attendance(
             db,
-            context,
-            [attendance_data.student_id],
-        )
-
-        row = db.execute(
-            text(
-                """
-                INSERT INTO attendance (
-                    session_id,
-                    student_id,
-                    status,
-                    remarks
-                )
-                VALUES (
-                    :session_id,
-                    :student_id,
-                    :status,
-                    :remarks
-                )
-                RETURNING
-                    id,
-                    session_id,
-                    student_id,
-                    status,
-                    remarks
-                """
-            ),
             {
-                "session_id": attendance_data.session_id,
-                "student_id": attendance_data.student_id,
-                "status": attendance_data.status,
-                "remarks": attendance_data.remarks,
+                "session_id": data.session_id,
+                "student_id": data.student_id,
+                "status": data.status,
+                "remarks": data.remarks,
             },
-        ).mappings().first()
+        )
+        if record is None:
+            raise HTTPException(500, "Attendance could not be created")
 
         db.commit()
-
-        return dict(row)
-
-    except IntegrityError as exc:
-        db.rollback()
-
-        raise HTTPException(
-            status_code=409,
-            detail="Attendance already exists for this student and session",
-        ) from exc
+        return record
 
     except HTTPException:
-        raise
-
-    except Exception as exc:
         db.rollback()
-
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        logger.warning("Duplicate or invalid attendance insert", exc_info=True)
         raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Attendance already exists for this student and session",
         ) from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        _raise_database_error(exc, "creation")
 
 
-def get_attendance(
-    db: Session,
-):
+def get_attendance(db: Session):
     try:
-        rows = db.execute(
-            text(
-                """
-                SELECT
-                    id,
-                    session_id,
-                    student_id,
-                    status,
-                    remarks
-                FROM attendance
-                ORDER BY id DESC
-                """
-            )
-        ).mappings().all()
+        return model.get_all_attendance(db)
+    except SQLAlchemyError as exc:
+        _raise_database_error(exc, "listing")
 
-        return [dict(row) for row in rows]
 
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
+def get_one_attendance(attendance_id: int, db: Session):
+    try:
+        record = model.get_attendance_by_id(db, attendance_id)
+        if record is None:
+            raise HTTPException(404, "Attendance record not found")
+        return record
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        _raise_database_error(exc, "retrieval")
 
 
 def get_class_roster(
     grade_id: int,
     section_id: int,
-    session_date,
+    session_date: date,
     session_id: int | None,
     db: Session,
 ):
     try:
-        class_row = db.execute(
-            text(
-                """
-                SELECT
-                    g.id AS grade_id,
-                    g.grade,
-                    s.id AS section_id,
-                    s.section
-                FROM grades g
-                JOIN sections s
-                    ON s.id = :section_id
-                WHERE g.id = :grade_id
-                """
-            ),
-            {
-                "grade_id": grade_id,
-                "section_id": section_id,
-            },
-        ).mappings().first()
-
-        if not class_row:
-            raise HTTPException(
-                status_code=404,
-                detail="Class or section not found",
-            )
+        klass = model.get_class(db, grade_id, section_id)
+        if klass is None:
+            raise HTTPException(404, "Class or section not found")
 
         if session_id is not None:
-            session_row = db.execute(
-                text(
-                    """
-                    SELECT
-                        cs.id,
-                        cs.session_date,
-                        t.grade_id,
-                        t.section_id
-                    FROM class_sessions cs
-                    JOIN timetables t
-                        ON t.id = cs.timetable_id
-                    WHERE cs.id = :session_id
-                    """
-                ),
-                {"session_id": session_id},
-            ).mappings().first()
-
-            if not session_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Class session not found",
-                )
+            session = model.get_class_session(db, session_id)
+            if session is None:
+                raise HTTPException(404, "Class session not found")
 
             if (
-                session_row["session_date"] != session_date
-                or session_row["grade_id"] != grade_id
-                or session_row["section_id"] != section_id
+                session["session_date"] != session_date
+                or session["grade_id"] != grade_id
+                or session["section_id"] != section_id
             ):
                 raise HTTPException(
-                    status_code=400,
-                    detail="Session does not belong to this class, section and date",
+                    400,
+                    "Session does not belong to this class, section and date",
                 )
-
-        students = db.execute(
-            text(
-                """
-                SELECT
-                    st.id,
-                    st.name,
-                    st.roll_number,
-                    st.section,
-                    st.grade
-                FROM students st
-                WHERE LOWER(TRIM(st.section)) =
-                      LOWER(TRIM(:section))
-                """
-            ),
-            {
-                "section": class_row["section"],
-            },
-        ).mappings().all()
 
         students = [
             student
-            for student in students
-            if _student_in_session_class(
-                student,
-                class_row,
+            for student in model.get_students_by_section(
+                db, klass["section"] or ""
             )
+            if _student_in_class(student, klass)
         ]
 
-        students = sorted(
-            students,
-            key=_roll_sort_key,
-        )
-
-        attendance_map = {}
-
-        if session_id is not None:
-            attendance_rows = db.execute(
-                text(
-                    """
-                    SELECT
-                        id,
-                        student_id,
-                        status,
-                        remarks
-                    FROM attendance
-                    WHERE session_id = :session_id
-                    """
-                ),
-                {"session_id": session_id},
-            ).mappings().all()
-
-            attendance_map = {
-                row["student_id"]: dict(row)
-                for row in attendance_rows
-            }
-
-        student_items = []
-
-        for student in students:
-            attendance = attendance_map.get(student["id"])
-
-            student_items.append(
-                {
-                    "id": student["id"],
-                    "name": student["name"],
-                    "roll_number": student["roll_number"],
-                    "attendance_id": (
-                        attendance["id"]
-                        if attendance
-                        else None
-                    ),
-                    "status": (
-                        attendance["status"]
-                        if attendance
-                        else None
-                    ),
-                    "remarks": (
-                        attendance["remarks"]
-                        if attendance
-                        else None
-                    ),
-                }
+        def roll_sort_key(student):
+            roll = str(student.get("roll_number") or "").strip()
+            match = re.search(r"\d+", roll)
+            return (
+                int(match.group()) if match else 10**9,
+                roll.lower(),
+                str(student.get("name") or "").lower(),
             )
 
-        marked_students = sum(
-            1
-            for student in student_items
-            if student["attendance_id"] is not None
+        students.sort(key=roll_sort_key)
+
+        recorded = (
+            model.get_attendance_for_session(db, session_id)
+            if session_id is not None
+            else []
+        )
+        attendance_by_student = {
+            row["student_id"]: row for row in recorded
+        }
+
+        roster = []
+        for student in students:
+            record = attendance_by_student.get(student["id"])
+            roster.append({
+                "id": student["id"],
+                "name": student.get("name"),
+                "roll_number": student.get("roll_number"),
+                "attendance_id": record["id"] if record else None,
+                "status": record["status"] if record else None,
+                "remarks": record["remarks"] if record else None,
+            })
+
+        marked_count = sum(
+            1 for item in roster if item["attendance_id"] is not None
         )
 
         return {
             "grade_id": grade_id,
             "section_id": section_id,
-            "grade": class_row["grade"],
-            "section": class_row["section"],
+            "grade": klass["grade"],
+            "section": klass["section"],
             "session_date": session_date,
             "session_id": session_id,
-            "total_students": len(student_items),
-            "marked_students": marked_students,
-            "students": student_items,
+            "total_students": len(roster),
+            "marked_students": marked_count,
+            "students": roster,
         }
 
     except HTTPException:
         raise
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
+    except SQLAlchemyError as exc:
+        _raise_database_error(exc, "roster retrieval")
 
 
 def get_student_attendance_report(
@@ -444,426 +253,177 @@ def get_student_attendance_report(
     db: Session,
 ):
     roll_number = roll_number.strip()
-
     if not roll_number:
-        raise HTTPException(
-            status_code=400,
-            detail="Enter a roll number",
-        )
+        raise HTTPException(400, "Enter a roll number")
 
     if (grade_id is None) != (section_id is None):
         raise HTTPException(
-            status_code=400,
-            detail="Provide both grade_id and section_id, or neither",
+            400,
+            "Provide both grade_id and section_id, or neither",
         )
 
     try:
-        candidates = db.execute(
-            text(
-                """
-                SELECT
-                    st.id,
-                    st.name,
-                    st.roll_number,
-                    st.section,
-                    st.grade
-                FROM students st
-                WHERE LOWER(TRIM(st.roll_number)) =
-                      LOWER(TRIM(:roll_number))
-                """
-            ),
-            {
-                "roll_number": roll_number,
-            },
-        ).mappings().all()
+        candidates = model.get_student_candidates_by_roll(db, roll_number)
 
         if grade_id is not None and section_id is not None:
-            class_row = db.execute(
-                text(
-                    """
-                    SELECT
-                        g.id AS grade_id,
-                        g.grade,
-                        s.id AS section_id,
-                        s.section
-                    FROM grades g
-                    JOIN sections s
-                        ON s.id = :section_id
-                    WHERE g.id = :grade_id
-                    """
-                ),
-                {
-                    "grade_id": grade_id,
-                    "section_id": section_id,
-                },
-            ).mappings().first()
-
-            if not class_row:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Class or section not found",
-                )
+            klass = model.get_class(db, grade_id, section_id)
+            if klass is None:
+                raise HTTPException(404, "Class or section not found")
 
             candidates = [
-                student
-                for student in candidates
-                if _student_in_session_class(
-                    student,
-                    class_row,
-                )
+                student for student in candidates
+                if _student_in_class(student, klass)
             ]
 
         if not candidates:
             raise HTTPException(
-                status_code=404,
-                detail="No student found with this roll number",
+                404, "No student found with this roll number"
             )
 
         if len(candidates) > 1:
             raise HTTPException(
-                status_code=409,
-                detail=(
-                    "More than one student has this roll number. "
-                    "Select a grade and section"
-                ),
+                409,
+                "More than one student has this roll number. Select a grade and section",
             )
 
         student = candidates[0]
+        records = model.get_attendance_report_records(db, student["id"])
 
-        records = db.execute(
-            text(
-                """
-                SELECT
-                    a.id,
-                    a.session_id,
-                    a.status,
-                    a.remarks,
-                    cs.session_date,
-                    t.period_number,
-                    t.start_time
-                FROM attendance a
-                JOIN class_sessions cs
-                    ON cs.id = a.session_id
-                JOIN timetables t
-                    ON t.id = cs.timetable_id
-                WHERE a.student_id = :student_id
-                ORDER BY
-                    cs.session_date DESC,
-                    t.period_number NULLS LAST,
-                    t.start_time
-                """
-            ),
-            {
-                "student_id": student["id"],
-            },
-        ).mappings().all()
-
+        counts = Counter(str(row["status"]).upper() for row in records)
         total = len(records)
-
-        present = sum(
-            1
-            for record in records
-            if str(record["status"]).upper() == "PRESENT"
-        )
-
-        absent = sum(
-            1
-            for record in records
-            if str(record["status"]).upper() == "ABSENT"
-        )
-
-        late = sum(
-            1
-            for record in records
-            if str(record["status"]).upper() == "LATE"
-        )
-
-        excused = sum(
-            1
-            for record in records
-            if str(record["status"]).upper() == "EXCUSED"
-        )
-
-        attended = present + late
-
-        percentage = (
-            round((attended * 100) / total, 1)
-            if total
-            else 0.0
-        )
+        attended = counts["PRESENT"] + counts["LATE"]
 
         return {
-            "student_id": student["id"],
-            "name": student["name"],
-            "roll_number": student["roll_number"],
-            "grade": student["grade"],
-            "section": student["section"],
+            "student": {
+                "id": student["id"],
+                "name": student.get("name"),
+                "roll_number": student.get("roll_number"),
+                "grade": student.get("grade"),
+                "section": student.get("section"),
+            },
             "total_classes": total,
-            "present": present,
-            "absent": absent,
-            "late": late,
-            "excused": excused,
-            "attendance_percentage": percentage,
-            "records": [dict(record) for record in records],
+            "attended_classes": attended,
+            "present": counts["PRESENT"],
+            "absent": counts["ABSENT"],
+            "late": counts["LATE"],
+            "excused": counts["EXCUSED"],
+            "percentage": round(attended * 100 / total, 1) if total else 0.0,
+            "records": records,
         }
 
     except HTTPException:
         raise
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
-
-
-def get_attendance_record(
-    attendance_id: int,
-    db: Session,
-):
-    row = db.execute(
-        text(
-            """
-            SELECT
-                id,
-                session_id,
-                student_id,
-                status,
-                remarks
-            FROM attendance
-            WHERE id = :attendance_id
-            """
-        ),
-        {
-            "attendance_id": attendance_id,
-        },
-    ).mappings().first()
-
-    if not row:
-        raise HTTPException(
-            status_code=404,
-            detail="Attendance record not found",
-        )
-
-    return dict(row)
+    except SQLAlchemyError as exc:
+        _raise_database_error(exc, "report generation")
 
 
 def update_attendance(
     attendance_id: int,
-    attendance_data: AttendanceUpdate,
+    data: AttendanceUpdate,
     db: Session,
 ):
-    update_data = attendance_data.model_dump(
-        exclude_unset=True
-    )
-
-    if not update_data:
+    payload = data.model_dump(exclude_unset=True)
+    if not payload:
         raise HTTPException(
-            status_code=400,
-            detail="No attendance fields were provided for update",
+            400, "No attendance fields were provided for update"
         )
 
     try:
-        set_parts = []
-        params = {
-            "attendance_id": attendance_id,
-        }
+        existing = model.get_attendance_by_id(db, attendance_id)
+        if existing is None:
+            raise HTTPException(404, "Attendance record not found")
 
-        if "status" in update_data:
-            set_parts.append("status = :status")
-            params["status"] = update_data["status"]
-
-        if "remarks" in update_data:
-            set_parts.append("remarks = :remarks")
-            params["remarks"] = update_data["remarks"]
-
-        row = db.execute(
-            text(
-                f"""
-                UPDATE attendance
-                SET {", ".join(set_parts)}
-                WHERE id = :attendance_id
-                RETURNING
-                    id,
-                    session_id,
-                    student_id,
-                    status,
-                    remarks
-                """
-            ),
-            params,
-        ).mappings().first()
-
-        if not row:
-            db.rollback()
-
-            raise HTTPException(
-                status_code=404,
-                detail="Attendance record not found",
-            )
+        updated = model.update_attendance_record(
+            db, attendance_id, payload
+        )
+        if updated is None:
+            raise HTTPException(400, "No valid attendance fields were provided")
 
         db.commit()
-
-        return dict(row)
+        return updated
 
     except HTTPException:
-        raise
-
-    except Exception as exc:
         db.rollback()
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        logger.warning("Attendance update violated a constraint", exc_info=True)
+        raise HTTPException(409, "Attendance update conflicts with a database constraint") from exc
+    except SQLAlchemyError as exc:
+        db.rollback()
+        _raise_database_error(exc, "update")
 
-        raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
 
-
-def delete_attendance(
-    attendance_id: int,
-    db: Session,
-):
+def delete_attendance(attendance_id: int, db: Session):
     try:
-        row = db.execute(
-            text(
-                """
-                DELETE FROM attendance
-                WHERE id = :attendance_id
-                RETURNING id
-                """
-            ),
-            {
-                "attendance_id": attendance_id,
-            },
-        ).mappings().first()
-
-        if not row:
-            db.rollback()
-
-            raise HTTPException(
-                status_code=404,
-                detail="Attendance record not found",
-            )
+        deleted = model.delete_attendance_record(db, attendance_id)
+        if deleted is None:
+            raise HTTPException(404, "Attendance record not found")
 
         db.commit()
-
         return {
             "success": True,
             "message": "Attendance deleted successfully",
-            "id": row["id"],
+            "id": deleted["id"],
         }
 
     except HTTPException:
-        raise
-
-    except Exception as exc:
         db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        _raise_database_error(exc, "deletion")
 
+
+def create_bulk_attendance(data: AttendanceBulkCreate, db: Session):
+    if not data.records:
+        raise HTTPException(400, "Attendance records cannot be empty")
+
+    student_ids = [record.student_id for record in data.records]
+    duplicates = sorted(
+        student_id
+        for student_id, count in Counter(student_ids).items()
+        if count > 1
+    )
+    if duplicates:
         raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
-
-
-def create_bulk_attendance(
-    attendance_data: AttendanceBulkCreate,
-    db: Session,
-):
-    if not attendance_data.records:
-        raise HTTPException(
-            status_code=400,
-            detail="Attendance records cannot be empty",
+            400,
+            "Duplicate student in attendance records: "
+            + ", ".join(map(str, duplicates)),
         )
-
-    student_ids = [
-        record.student_id
-        for record in attendance_data.records
-    ]
-
-    for student_id in student_ids:
-        if student_ids.count(student_id) > 1:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Duplicate student in attendance records: "
-                    f"{student_id}"
-                ),
-            )
 
     try:
-        context = _get_session_context(
-            db,
-            attendance_data.session_id,
-        )
+        context = _require_session(db, data.session_id)
+        _validate_students(db, context, student_ids)
 
-        _validate_students_for_session(
-            db,
-            context,
-            student_ids,
-        )
-
-        created_records = []
-
-        for record in attendance_data.records:
-            row = db.execute(
-                text(
-                    """
-                    INSERT INTO attendance (
-                        session_id,
-                        student_id,
-                        status,
-                        remarks
-                    )
-                    VALUES (
-                        :session_id,
-                        :student_id,
-                        :status,
-                        :remarks
-                    )
-                    RETURNING
-                        id,
-                        session_id,
-                        student_id,
-                        status,
-                        remarks
-                    """
-                ),
-                {
-                    "session_id": attendance_data.session_id,
-                    "student_id": record.student_id,
-                    "status": record.status,
-                    "remarks": record.remarks,
-                },
-            ).mappings().first()
-
-            created_records.append(dict(row))
+        created = [
+            model.insert_attendance_bulk_item(
+                db, data.session_id, record.model_dump()
+            )
+            for record in data.records
+        ]
 
         db.commit()
-
         return {
             "success": True,
             "message": "Attendance recorded successfully",
-            "count": len(created_records),
-            "records": created_records,
+            "count": len(created),
+            "records": created,
         }
 
+    except HTTPException:
+        db.rollback()
+        raise
     except IntegrityError as exc:
         db.rollback()
-
+        logger.warning("Bulk attendance insert conflicted", exc_info=True)
         raise HTTPException(
-            status_code=409,
-            detail="Attendance already exists for one or more students",
+            409,
+            "Attendance already exists for one or more students",
         ) from exc
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         db.rollback()
-
-        raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
+        _raise_database_error(exc, "bulk creation")
 
 
 def get_teacher_class_sessions(
@@ -872,124 +432,12 @@ def get_teacher_class_sessions(
     db: Session,
 ):
     try:
-        db.execute(
-            text(
-                """
-                INSERT INTO class_sessions (
-                    timetable_id,
-                    subject_id,
-                    staff_id,
-                    session_date,
-                    is_conducted
-                )
-                SELECT
-                    t.id,
-                    t.default_subject_id,
-                    t.default_staff_id,
-                    :session_date,
-                    FALSE
-                FROM timetables t
-                WHERE t.default_staff_id = :staff_id
-                  AND t.default_subject_id IS NOT NULL
-                  AND t.status = 'active'
-                  AND t.day_of_week = :day_of_week
-                  AND (t.valid_from IS NULL OR t.valid_from <= :session_date)
-                  AND (t.valid_to IS NULL OR t.valid_to >= :session_date)
-                ON CONFLICT (timetable_id, session_date) DO NOTHING
-                """
-            ),
-            {
-                "session_date": session_date,
-                "staff_id": staff_id,
-                "day_of_week": session_date.isoweekday(),
-            },
-        )
+        sessions = model.get_teacher_sessions(db, session_date, staff_id)
         db.commit()
-
-        rows = db.execute(
-            text(
-                """
-                SELECT
-                    cs.id AS session_id,
-                    cs.timetable_id,
-                    cs.session_date,
-                    t.grade_id,
-                    t.section_id,
-                    g.grade,
-                    sec.section,
-                    cs.subject_id,
-                    sub.name AS subject_name,
-                    t.period_number,
-                    t.start_time,
-                    t.end_time,
-                    t.room,
-                    cs.is_conducted
-                FROM class_sessions cs
-                JOIN timetables t ON t.id = cs.timetable_id
-                LEFT JOIN grades g ON g.id = t.grade_id
-                JOIN sections sec ON sec.id = t.section_id
-                JOIN subjects sub ON sub.id = cs.subject_id
-                WHERE cs.staff_id = :staff_id
-                  AND cs.session_date = :session_date
-                ORDER BY t.period_number NULLS LAST, t.start_time, cs.id
-                """
-            ),
-            {
-                "staff_id": staff_id,
-                "session_date": session_date,
-            },
-        ).mappings().all()
-
-        return {
-            "session_date": session_date,
-            "classes": [dict(row) for row in rows],
-        }
-
-    except Exception as exc:
+        return {"session_date": session_date, "classes": sessions}
+    except SQLAlchemyError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
-
-
-def _get_teacher_session_context(
-    db: Session,
-    session_id: int,
-    staff_id: int,
-):
-    row = db.execute(
-        text(
-            """
-            SELECT
-                cs.id,
-                cs.staff_id,
-                cs.session_date,
-                t.grade_id,
-                t.section_id,
-                g.grade,
-                sec.section
-            FROM class_sessions cs
-            JOIN timetables t ON t.id = cs.timetable_id
-            LEFT JOIN grades g ON g.id = t.grade_id
-            JOIN sections sec ON sec.id = t.section_id
-            WHERE cs.id = :session_id
-              AND cs.staff_id = :staff_id
-            """
-        ),
-        {
-            "session_id": session_id,
-            "staff_id": staff_id,
-        },
-    ).mappings().first()
-
-    if not row:
-        raise HTTPException(
-            status_code=404,
-            detail="Class session not found or not assigned to this staff member",
-        )
-
-    return row
+        _raise_database_error(exc, "teacher session retrieval")
 
 
 def get_teacher_class_roster(
@@ -998,52 +446,39 @@ def get_teacher_class_roster(
     db: Session,
 ):
     try:
-        context = _get_teacher_session_context(db, session_id, staff_id)
-        student_rows = db.execute(
-            text(
-                """
-                SELECT id, name, roll_number, section, grade
-                FROM students
-                WHERE LOWER(TRIM(COALESCE(section, ''))) =
-                      LOWER(TRIM(:section))
-                """
-            ),
-            {"section": context["section"] or ""},
-        ).mappings().all()
+        context = _require_teacher_session(db, session_id, staff_id)
         students = [
             student
-            for student in student_rows
-            if _student_in_session_class(student, context)
+            for student in model.get_students_by_section(
+                db, context["section"] or ""
+            )
+            if _student_in_class(student, context)
         ]
-        students.sort(key=_roll_sort_key)
 
-        attendance_rows = db.execute(
-            text(
-                """
-                SELECT id, student_id, status, remarks
-                FROM attendance
-                WHERE session_id = :session_id
-                """
-            ),
-            {"session_id": session_id},
-        ).mappings().all()
-        attendance_by_student = {
-            row["student_id"]: row for row in attendance_rows
-        }
+        def roll_sort_key(student):
+            roll = str(student.get("roll_number") or "").strip()
+            match = re.search(r"\d+", roll)
+            return (
+                int(match.group()) if match else 10**9,
+                roll.lower(),
+                str(student.get("name") or "").lower(),
+            )
+
+        students.sort(key=roll_sort_key)
+        attendance = model.get_attendance_for_session(db, session_id)
+        by_student = {row["student_id"]: row for row in attendance}
 
         roster = []
         for student in students:
-            record = attendance_by_student.get(student["id"])
-            roster.append(
-                {
-                    "id": student["id"],
-                    "name": student["name"],
-                    "roll_number": student["roll_number"],
-                    "attendance_id": record["id"] if record else None,
-                    "status": record["status"] if record else None,
-                    "remarks": record["remarks"] if record else None,
-                }
-            )
+            record = by_student.get(student["id"])
+            roster.append({
+                "id": student["id"],
+                "name": student.get("name"),
+                "roll_number": student.get("roll_number"),
+                "attendance_id": record["id"] if record else None,
+                "status": record["status"] if record else None,
+                "remarks": record["remarks"] if record else None,
+            })
 
         return {
             "grade_id": context["grade_id"],
@@ -1053,88 +488,48 @@ def get_teacher_class_roster(
             "session_date": context["session_date"],
             "session_id": session_id,
             "total_students": len(roster),
-            "marked_students": len(attendance_by_student),
+            "marked_students": sum(
+                1 for row in roster if row["attendance_id"] is not None
+            ),
             "students": roster,
         }
 
     except HTTPException:
         raise
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
+    except SQLAlchemyError as exc:
+        _raise_database_error(exc, "teacher roster retrieval")
 
 
 def save_teacher_class_attendance(
     session_id: int,
     staff_id: int,
-    attendance_data: TeacherAttendanceBulkCreate,
+    data: TeacherAttendanceBulkCreate,
     db: Session,
 ):
-    student_ids = [record.student_id for record in attendance_data.records]
+    student_ids = [record.student_id for record in data.records]
     duplicates = sorted(
-        {
-            student_id
-            for student_id, count in Counter(student_ids).items()
-            if count > 1
-        }
+        student_id
+        for student_id, count in Counter(student_ids).items()
+        if count > 1
     )
     if duplicates:
         raise HTTPException(
-            status_code=400,
-            detail="Duplicate student in attendance records: "
-            + ", ".join(str(student_id) for student_id in duplicates),
+            400,
+            "Duplicate student in attendance records: "
+            + ", ".join(map(str, duplicates)),
         )
 
     try:
-        context = _get_teacher_session_context(db, session_id, staff_id)
-        _validate_students_for_session(db, context, student_ids)
+        context = _require_teacher_session(db, session_id, staff_id)
+        _validate_students(db, context, student_ids)
 
-        records = []
-        for record in attendance_data.records:
-            row = db.execute(
-                text(
-                    """
-                    INSERT INTO attendance (
-                        session_id,
-                        student_id,
-                        status,
-                        remarks
-                    )
-                    VALUES (
-                        :session_id,
-                        :student_id,
-                        :status,
-                        :remarks
-                    )
-                    ON CONFLICT (session_id, student_id)
-                    DO UPDATE SET
-                        status = EXCLUDED.status,
-                        remarks = EXCLUDED.remarks
-                    RETURNING id, session_id, student_id, status, remarks
-                    """
-                ),
-                {
-                    "session_id": session_id,
-                    "student_id": record.student_id,
-                    "status": record.status,
-                    "remarks": record.remarks,
-                },
-            ).mappings().first()
-            records.append(dict(row))
-
-        db.execute(
-            text(
-                """
-                UPDATE class_sessions
-                SET is_conducted = TRUE
-                WHERE id = :session_id
-                """
-            ),
-            {"session_id": session_id},
-        )
+        records = [
+            model.upsert_teacher_attendance(
+                db, session_id, record.model_dump()
+            )
+            for record in data.records
+        ]
+        model.mark_session_conducted(db, session_id)
         db.commit()
 
         return {
@@ -1149,17 +544,13 @@ def save_teacher_class_attendance(
     except HTTPException:
         db.rollback()
         raise
-
     except IntegrityError as exc:
         db.rollback()
+        logger.warning("Teacher attendance save conflicted", exc_info=True)
         raise HTTPException(
-            status_code=409,
-            detail="Attendance could not be saved because of a conflicting record",
+            409,
+            "Attendance could not be saved because of a conflicting record",
         ) from exc
-
-    except Exception as exc:
+    except SQLAlchemyError as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=503,
-            detail="Attendance service unavailable",
-        ) from exc
+        _raise_database_error(exc, "teacher attendance save")

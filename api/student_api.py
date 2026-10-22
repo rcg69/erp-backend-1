@@ -1,9 +1,10 @@
+
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from database import get_db
 from schemas.student_schema import StudentCreate, StudentUpdate
-from security.auth import get_current_user, require_admin
+from security.auth import require_admin, require_admin_or_staff
 from services import student_service
 
 
@@ -19,15 +20,12 @@ def create_student(
     _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    return student_service.create_student(
-        student,
-        db,
-    )
+    return student_service.create_student(student, db)
 
 
 @router.get("")
 def get_students(
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_admin_or_staff),
     db: Session = Depends(get_db),
 ):
     return student_service.get_students(db)
@@ -36,13 +34,10 @@ def get_students(
 @router.get("/{student_id}")
 def get_student(
     student_id: int,
-    _current_user=Depends(get_current_user),
+    _current_user=Depends(require_admin_or_staff),
     db: Session = Depends(get_db),
 ):
-    return student_service.get_student(
-        student_id,
-        db,
-    )
+    return student_service.get_student(student_id, db)
 
 
 @router.put("/{student_id}")
@@ -52,11 +47,7 @@ def update_student(
     _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    return student_service.update_student(
-        student_id,
-        student,
-        db,
-    )
+    return student_service.update_student(student_id, student, db)
 
 
 @router.delete("/{student_id}")
@@ -65,7 +56,4 @@ def delete_student(
     _current_user=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    return student_service.delete_student(
-        student_id,
-        db,
-    )
+    return student_service.delete_student(student_id, db)
