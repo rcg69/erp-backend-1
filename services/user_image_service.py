@@ -1,3 +1,4 @@
+import logging
 from pathlib import PureWindowsPath
 
 from fastapi import HTTPException
@@ -7,6 +8,8 @@ from sqlalchemy.orm import Session
 from models.user_image_model import UserImageRecord
 from services.class_assignment_service import teacher_assigned_to_student_class
 
+
+logger = logging.getLogger(__name__)
 
 MAX_IMAGE_SIZE = 5 * 1024 * 1024
 
@@ -210,6 +213,7 @@ def replace_user_image(
         raise
     except Exception as exc:
         db.rollback()
+        logger.exception("Failed to store profile image")
         raise HTTPException(
             status_code=503,
             detail="Profile image service unavailable",
@@ -240,6 +244,7 @@ def get_user_image(image_id: int, db: Session) -> dict:
     except HTTPException:
         raise
     except Exception as exc:
+        logger.exception("Failed to retrieve profile image")
         raise HTTPException(
             status_code=503,
             detail="Profile image service unavailable",
