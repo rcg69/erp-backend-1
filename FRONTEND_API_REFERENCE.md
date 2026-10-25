@@ -27,6 +27,8 @@ Authorization: Bearer <access_token>
 | PATCH | `/api/user-details/{user_id}` | Admin; staff assigned to a student | Update a user's profile |
 | PUT | `/api/user-images/users/{user_id}` | Admin; staff updating their own image; assigned teacher updating a student in their assigned class | Upload or replace a profile image |
 | GET | `/api/user-images/{image_id}` | Authenticated | Load an image by its ID |
+| GET | `/api/attendance?academic_year={academic_year}` | Authenticated | List attendance, optionally filtered by academic year |
+| GET | `/api/attendance/student-report?roll_number={roll_number}&academic_year={academic_year}` | Public | Get a student's attendance for the selected academic year |
 | GET | `/api/attendance/teacher/classes` | Staff only | Get the signed-in teacher's assigned classes for a date |
 | GET | `/api/attendance/teacher/sessions/{session_id}/roster` | Staff only | Load the class roster and existing attendance |
 | PUT | `/api/attendance/teacher/sessions/{session_id}/attendance` | Assigned staff only | Save or update attendance for that class session |
@@ -565,5 +567,19 @@ Saves attendance for the specified assigned session. The session ID comes from t
 Allowed statuses are `PRESENT`, `ABSENT`, `LATE`, and `EXCUSED`. Re-sending a student updates their existing attendance record, so the frontend can retry or correct a mark without creating duplicates. The backend rejects duplicate student IDs in one request and students who do not belong to the selected class. Saving attendance marks the class session as conducted.
 
 The legacy attendance create, bulk-create, update, and delete routes are administrator-only. Teachers should use the assigned-class routes above.
+
+## Attendance by academic year
+
+Attendance is assigned the academic year configured on the grade linked to the session's timetable. The client does not send the year when marking attendance. Existing attendance rows are backfilled from their session's timetable grade when possible; older rows without a grade/year mapping keep a null academic year.
+
+`GET /api/attendance` returns all years unless the optional `academic_year` query parameter is supplied. Student attendance reports default to the single active academic year matching the student's current grade and section. When moving to a new academic year, activate the new grade/year and deactivate the previous one. If no active year or multiple active years match, the report returns `409`; provide `academic_year` to select a year explicitly.
+
+Use `GET /api/attendance/student-report?roll_number=STU-101` for the student's current year, or include `academic_year` to view a previous year:
+
+```http
+GET /api/attendance/student-report?roll_number=STU-101&academic_year=2025-2026
+```
+
+The response includes the selected `academic_year`. Each attendance record also includes its academic year. The report counts and percentage only include records from the selected year.
 
 When creating or updating users, `person_id` must reference an existing student for student accounts or an existing staff record for `staff` accounts.

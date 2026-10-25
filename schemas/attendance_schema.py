@@ -26,6 +26,7 @@ class AttendanceResponse(BaseModel):
     id: int
     session_id: int
     student_id: int
+    academic_year: str | None = None
     status: str
     remarks: str | None = None
 
@@ -51,6 +52,7 @@ class TeacherClassSession(BaseModel):
     session_date: date
     grade_id: int | None = None
     section_id: int
+    academic_year: str | None = None
     grade: str | None = None
     section: str
     subject_id: int
@@ -81,6 +83,7 @@ class ClassRosterResponse(BaseModel):
     section_id: int
     grade: str | None = None
     section: str | None = None
+    academic_year: str | None = None
     session_date: date
     session_id: int | None = None
     total_students: int
@@ -99,6 +102,7 @@ class ReportStudent(BaseModel):
 class StudentAttendanceItem(BaseModel):
     attendance_id: int
     session_id: int
+    academic_year: str | None = None
     session_date: date
     period_number: int | None = None
     start_time: time
@@ -110,6 +114,7 @@ class StudentAttendanceItem(BaseModel):
 
 
 class StudentAttendanceReport(BaseModel):
+    academic_year: str
     student: ReportStudent
     total_classes: int
     attended_classes: int

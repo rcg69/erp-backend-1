@@ -42,8 +42,15 @@ def create_attendance(
     "",
     response_model=list[AttendanceResponse],
 )
-def get_attendance(db: Session = Depends(get_db)):
-    return attendance_service.get_attendance(db)
+def get_attendance(
+    academic_year: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=20,
+    ),
+    db: Session = Depends(get_db),
+):
+    return attendance_service.get_attendance(db, academic_year)
 
 
 @router.get(
@@ -70,10 +77,15 @@ def get_student_attendance_report(
     roll_number: str = Query(...),
     grade_id: int | None = Query(default=None),
     section_id: int | None = Query(default=None),
+    academic_year: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=20,
+    ),
     db: Session = Depends(get_db),
 ):
     return attendance_service.get_student_attendance_report(
-        roll_number, grade_id, section_id, db
+        roll_number, grade_id, section_id, academic_year, db
     )
 
 

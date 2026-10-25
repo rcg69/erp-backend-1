@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 
 ATTENDANCE_COLUMNS = """
-    id, session_id, student_id, status, remarks
+    id, session_id, student_id, academic_year, status, remarks
 """
 
 
@@ -22,7 +22,7 @@ def _dicts(rows):
 def get_session_context(db: Session, session_id: int):
     row = db.execute(
         text("""
-            SELECT cs.id, sec.section, g.grade
+            SELECT cs.id, sec.section, g.grade, g.academic_year
             FROM class_sessions cs
             JOIN timetables t ON t.id = cs.timetable_id
             JOIN sections sec ON sec.id = t.section_id
@@ -37,12 +37,13 @@ def get_session_context(db: Session, session_id: int):
 def get_class(db: Session, grade_id: int, section_id: int):
     row = db.execute(
         text("""
-            SELECT g.id AS grade_id, g.grade,
+            SELECT g.id AS grade_id, g.grade, g.academic_year,
                    sec.id AS section_id, sec.section
             FROM grades g
             CROSS JOIN sections sec
             WHERE g.id = :grade_id
               AND sec.id = :section_id
+              AND (g.section_id IS NULL OR g.section_id = sec.id)
         """),
         {"grade_id": grade_id, "section_id": section_id},
     ).mappings().first()
@@ -52,9 +53,12 @@ def get_class(db: Session, grade_id: int, section_id: int):
 def get_class_session(db: Session, session_id: int):
     row = db.execute(
         text("""
-            SELECT cs.id, cs.session_date, t.grade_id, t.section_id
+            SELECT
+                cs.id, cs.session_date, t.grade_id, t.section_id,
+                g.academic_year
             FROM class_sessions cs
             JOIN timetables t ON t.id = cs.timetable_id
+            LEFT JOIN grades g ON g.id = t.grade_id
             WHERE cs.id = :session_id
         """),
         {"session_id": session_id},
@@ -105,7 +109,7 @@ def get_student_candidates_by_roll(db: Session, roll_number: str):
 def get_attendance_for_session(db: Session, session_id: int):
     rows = db.execute(
         text("""
-            SELECT id, student_id, status, remarks
+            SELECT id, student_id, academic_year, status, remarks
             FROM attendance
             WHERE session_id = :session_id
         """),
@@ -114,12 +118,37 @@ def get_attendance_for_session(db: Session, session_id: int):
     return _dicts(rows)
 
 
-def get_attendance_report_records(db: Session, student_id: int):
+def get_current_academic_year_for_student(db: Session, student: dict):
+    rows = db.execute(
+        text("""
+            SELECT DISTINCT g.academic_year
+            FROM grades g
+            JOIN sections sec ON sec.id = g.section_id
+            WHERE LOWER(TRIM(g.grade)) = LOWER(TRIM(:grade))
+              AND LOWER(TRIM(sec.section)) = LOWER(TRIM(:section))
+              AND LOWER(g.status) = 'active'
+            ORDER BY g.academic_year DESC
+            LIMIT 2
+        """),
+        {
+            "grade": student.get("grade") or "",
+            "section": student.get("section") or "",
+        },
+    ).mappings().all()
+    return [row["academic_year"] for row in rows]
+
+
+def get_attendance_report_records(
+    db: Session,
+    student_id: int,
+    academic_year: str,
+):
     rows = db.execute(
         text("""
             SELECT
                 a.id AS attendance_id,
                 a.session_id,
+                a.academic_year,
                 a.status,
                 a.remarks,
                 cs.session_date,
@@ -132,22 +161,26 @@ def get_attendance_report_records(db: Session, student_id: int):
             JOIN class_sessions cs ON cs.id = a.session_id
             JOIN timetables t ON t.id = cs.timetable_id
             WHERE a.student_id = :student_id
+              AND a.academic_year = :academic_year
             ORDER BY cs.session_date DESC,
                      t.period_number NULLS LAST,
                      t.start_time
         """),
-        {"student_id": student_id},
+        {"student_id": student_id, "academic_year": academic_year},
     ).mappings().all()
     return _dicts(rows)
 
 
-def get_all_attendance(db: Session):
+def get_all_attendance(db: Session, academic_year: str | None = None):
     rows = db.execute(
         text(f"""
             SELECT {ATTENDANCE_COLUMNS}
             FROM attendance
+            WHERE CAST(:academic_year AS VARCHAR) IS NULL
+               OR academic_year = :academic_year
             ORDER BY id DESC
-        """)
+        """),
+        {"academic_year": academic_year},
     ).mappings().all()
     return _dicts(rows)
 
@@ -168,9 +201,9 @@ def insert_attendance(db: Session, payload: dict):
     row = db.execute(
         text(f"""
             INSERT INTO attendance
-                (session_id, student_id, status, remarks)
+                (session_id, student_id, academic_year, status, remarks)
             VALUES
-                (:session_id, :student_id, :status, :remarks)
+                (:session_id, :student_id, :academic_year, :status, :remarks)
             RETURNING {ATTENDANCE_COLUMNS}
         """),
         payload,
@@ -188,6 +221,7 @@ def insert_attendance_bulk_item(
         {
             "session_id": session_id,
             "student_id": record["student_id"],
+            "academic_year": record["academic_year"],
             "status": record["status"],
             "remarks": record.get("remarks"),
         },
@@ -269,6 +303,7 @@ def get_teacher_sessions(db: Session, session_date: date, staff_id: int):
                 cs.session_date,
                 t.grade_id,
                 t.section_id,
+                g.academic_year,
                 g.grade,
                 sec.section,
                 cs.subject_id,
@@ -303,7 +338,7 @@ def get_teacher_session_context(
             SELECT
                 cs.id, cs.staff_id, cs.session_date,
                 t.grade_id, t.section_id,
-                g.grade, sec.section
+                g.grade, g.academic_year, sec.section
             FROM class_sessions cs
             JOIN timetables t ON t.id = cs.timetable_id
             LEFT JOIN grades g ON g.id = t.grade_id
@@ -324,20 +359,22 @@ def upsert_teacher_attendance(
     row = db.execute(
         text("""
             INSERT INTO attendance (
-                session_id, student_id, status, remarks
+                session_id, student_id, academic_year, status, remarks
             )
             VALUES (
-                :session_id, :student_id, :status, :remarks
+                :session_id, :student_id, :academic_year, :status, :remarks
             )
             ON CONFLICT (session_id, student_id)
             DO UPDATE SET
                 status = EXCLUDED.status,
-                remarks = EXCLUDED.remarks
-            RETURNING id, session_id, student_id, status, remarks
+                remarks = EXCLUDED.remarks,
+                academic_year = EXCLUDED.academic_year
+            RETURNING id, session_id, student_id, academic_year, status, remarks
         """),
         {
             "session_id": session_id,
             "student_id": record["student_id"],
+            "academic_year": record["academic_year"],
             "status": record["status"],
             "remarks": record.get("remarks"),
         },

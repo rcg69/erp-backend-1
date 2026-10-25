@@ -1047,6 +1047,8 @@ def ensure_database_schema() -> None:
                         REFERENCES students(id)
                         ON DELETE CASCADE,
 
+                    academic_year VARCHAR(20),
+
                     status VARCHAR(10) NOT NULL,
 
                     remarks TEXT,
@@ -1067,6 +1069,29 @@ def ensure_database_schema() -> None:
                             student_id
                         )
                 )
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                ALTER TABLE attendance
+                ADD COLUMN IF NOT EXISTS academic_year VARCHAR(20)
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                UPDATE attendance a
+                SET academic_year = g.academic_year
+                FROM class_sessions cs
+                JOIN timetables t ON t.id = cs.timetable_id
+                JOIN grades g ON g.id = t.grade_id
+                WHERE a.session_id = cs.id
+                  AND a.academic_year IS NULL
                 """
             )
         )
@@ -1139,6 +1164,15 @@ def ensure_database_schema() -> None:
                 """
                 CREATE INDEX IF NOT EXISTS idx_attendance_session
                 ON attendance(session_id)
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_attendance_academic_year_student
+                ON attendance(academic_year, student_id)
                 """
             )
         )

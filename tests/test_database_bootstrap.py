@@ -16,12 +16,16 @@ class DatabaseBootstrapTests(unittest.TestCase):
 
         self.assertIn("grades", inspector.get_table_names())
         self.assertIn("sections", inspector.get_table_names())
+        self.assertIn("attendance", inspector.get_table_names())
         self.assertIn("profile_images", inspector.get_table_names())
         self.assertIn("user_details", inspector.get_table_names())
 
         grade_columns = {column["name"] for column in inspector.get_columns("grades")}
         section_columns = {column["name"] for column in inspector.get_columns("sections")}
         student_columns = {column["name"] for column in inspector.get_columns("students")}
+        attendance_columns = {
+            column["name"] for column in inspector.get_columns("attendance")
+        }
         profile_image_columns = {
             column["name"] for column in inspector.get_columns("profile_images")
         }
@@ -33,6 +37,7 @@ class DatabaseBootstrapTests(unittest.TestCase):
         self.assertTrue({"section"}.issubset(section_columns))
         self.assertFalse("staff_id" in section_columns)
         self.assertTrue({"grade", "section"}.issubset(student_columns))
+        self.assertIn("academic_year", attendance_columns)
         self.assertTrue(
             {"user_id", "filename", "content_type", "image_data"}.issubset(
                 profile_image_columns

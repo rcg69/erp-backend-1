@@ -95,6 +95,16 @@ def _require_teacher_session(db, session_id, staff_id):
     return context
 
 
+def _require_session_academic_year(context):
+    academic_year = context.get("academic_year")
+    if not academic_year:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Academic year is not configured for this class session",
+        )
+    return academic_year
+
+
 def _raise_database_error(exc, operation):
     logger.exception("Database error during attendance %s", operation)
     raise HTTPException(
@@ -106,6 +116,7 @@ def _raise_database_error(exc, operation):
 def create_attendance(data: AttendanceCreate, db: Session):
     try:
         context = _require_session(db, data.session_id)
+        academic_year = _require_session_academic_year(context)
         _validate_students(db, context, [data.student_id])
 
         record = model.insert_attendance(
@@ -113,6 +124,7 @@ def create_attendance(data: AttendanceCreate, db: Session):
             {
                 "session_id": data.session_id,
                 "student_id": data.student_id,
+                "academic_year": academic_year,
                 "status": data.status,
                 "remarks": data.remarks,
             },
@@ -138,9 +150,14 @@ def create_attendance(data: AttendanceCreate, db: Session):
         _raise_database_error(exc, "creation")
 
 
-def get_attendance(db: Session):
+def get_attendance(db: Session, academic_year: str | None = None):
+    if academic_year is not None:
+        academic_year = academic_year.strip()
+        if not academic_year:
+            raise HTTPException(400, "Enter an academic year")
+
     try:
-        return model.get_all_attendance(db)
+        return model.get_all_attendance(db, academic_year)
     except SQLAlchemyError as exc:
         _raise_database_error(exc, "listing")
 
@@ -178,6 +195,10 @@ def get_class_roster(
                 session["session_date"] != session_date
                 or session["grade_id"] != grade_id
                 or session["section_id"] != section_id
+                or (
+                    klass.get("academic_year")
+                    and session.get("academic_year") != klass["academic_year"]
+                )
             ):
                 raise HTTPException(
                     400,
@@ -233,6 +254,7 @@ def get_class_roster(
             "section_id": section_id,
             "grade": klass["grade"],
             "section": klass["section"],
+            "academic_year": klass["academic_year"],
             "session_date": session_date,
             "session_id": session_id,
             "total_students": len(roster),
@@ -250,6 +272,7 @@ def get_student_attendance_report(
     roll_number: str,
     grade_id: int | None,
     section_id: int | None,
+    academic_year: str | None,
     db: Session,
 ):
     roll_number = roll_number.strip()
@@ -287,13 +310,36 @@ def get_student_attendance_report(
             )
 
         student = candidates[0]
-        records = model.get_attendance_report_records(db, student["id"])
+        if academic_year is None:
+            current_years = model.get_current_academic_year_for_student(
+                db, student
+            )
+            if not current_years:
+                raise HTTPException(
+                    409,
+                    "No active academic year is configured for this student's class",
+                )
+            if len(current_years) > 1:
+                raise HTTPException(
+                    409,
+                    "Multiple active academic years are configured for this student's class; provide academic_year",
+                )
+            academic_year = current_years[0]
+        else:
+            academic_year = academic_year.strip()
+            if not academic_year:
+                raise HTTPException(400, "Enter an academic year")
+
+        records = model.get_attendance_report_records(
+            db, student["id"], academic_year
+        )
 
         counts = Counter(str(row["status"]).upper() for row in records)
         total = len(records)
         attended = counts["PRESENT"] + counts["LATE"]
 
         return {
+            "academic_year": academic_year,
             "student": {
                 "id": student["id"],
                 "name": student.get("name"),
@@ -394,11 +440,14 @@ def create_bulk_attendance(data: AttendanceBulkCreate, db: Session):
 
     try:
         context = _require_session(db, data.session_id)
+        academic_year = _require_session_academic_year(context)
         _validate_students(db, context, student_ids)
 
         created = [
             model.insert_attendance_bulk_item(
-                db, data.session_id, record.model_dump()
+                db,
+                data.session_id,
+                {**record.model_dump(), "academic_year": academic_year},
             )
             for record in data.records
         ]
@@ -485,6 +534,7 @@ def get_teacher_class_roster(
             "section_id": context["section_id"],
             "grade": context["grade"],
             "section": context["section"],
+            "academic_year": context["academic_year"],
             "session_date": context["session_date"],
             "session_id": session_id,
             "total_students": len(roster),
@@ -521,11 +571,14 @@ def save_teacher_class_attendance(
 
     try:
         context = _require_teacher_session(db, session_id, staff_id)
+        academic_year = _require_session_academic_year(context)
         _validate_students(db, context, student_ids)
 
         records = [
             model.upsert_teacher_attendance(
-                db, session_id, record.model_dump()
+                db,
+                session_id,
+                {**record.model_dump(), "academic_year": academic_year},
             )
             for record in data.records
         ]
