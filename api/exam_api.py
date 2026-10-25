@@ -14,6 +14,7 @@ from schemas.exam_schema import (
     ExamUpdate,
     EvaluationProgress,
     MarksCorrection,
+    StudentExamSubjectResponse,
     StudentMarkEntry,
     StudentMarkResponse,
 )
@@ -133,6 +134,32 @@ def complete_evaluation(
     )
 
 
+@router.get("/student", response_model=list[ExamResponse])
+def list_student_exams(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return exam_service.list_student_exams(
+        current_user, limit, offset, db
+    )
+
+
+@router.get(
+    "/student/{exam_id}/subjects",
+    response_model=list[StudentExamSubjectResponse],
+)
+def list_student_exam_subjects(
+    exam_id: int,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return exam_service.list_student_exam_subjects(
+        exam_id, current_user, db
+    )
+
+
 @router.get("/results/{exam_id}")
 def get_exam_results(
     exam_id: int,
@@ -215,6 +242,15 @@ def publish_exam(
     db: Session = Depends(get_db),
 ):
     return exam_service.publish_exam(exam_id, db)
+
+
+@router.post("/{exam_id}/publish-override", response_model=ExamResponse)
+def override_publish_exam(
+    exam_id: int,
+    _current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    return exam_service.override_publish_exam(exam_id, db)
 
 
 @router.get("/{exam_id}/progress")

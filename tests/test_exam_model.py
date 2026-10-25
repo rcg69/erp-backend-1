@@ -1,6 +1,11 @@
 import unittest
 
-from models.exam_model import get_results, list_exams
+from models.exam_model import (
+    get_results,
+    list_exams,
+    list_student_exam_subjects,
+    list_student_exams,
+)
 
 
 class _Result:
@@ -179,6 +184,34 @@ class GetResultsTests(unittest.TestCase):
                 "es.evaluator_staff_id = :staff_id",
             ),
         )
+
+
+class ListStudentExamsTests(unittest.TestCase):
+    def test_list_student_exams_is_roster_scoped_and_excludes_drafts(self):
+        db = _Database(rows=[{"id": 17, "name": "Quarterly"}])
+
+        exams = list_student_exams(db, student_id=42, limit=25, offset=50)
+
+        self.assertEqual(exams, [{"id": 17, "name": "Quarterly"}])
+        self.assertIn("JOIN exam_students x ON x.exam_id = e.id", db.statement)
+        self.assertIn("x.student_id = :student_id", db.statement)
+        self.assertIn("e.status IN ('scheduled', 'completed', 'published')", db.statement)
+        self.assertIn("LIMIT :limit OFFSET :offset", db.statement)
+        self.assertEqual(
+            db.parameters,
+            {"student_id": 42, "limit": 25, "offset": 50},
+        )
+
+    def test_list_student_exam_subjects_returns_only_mark_allocations(self):
+        db = _Database(rows=[{"subject_id": 3, "max_marks": 100}])
+
+        subjects = list_student_exam_subjects(db, exam_id=17)
+
+        self.assertEqual(subjects, [{"subject_id": 3, "max_marks": 100}])
+        self.assertIn("FROM exam_subjects es", db.statement)
+        self.assertIn("WHERE es.exam_id = :exam_id", db.statement)
+        self.assertNotIn("evaluator_staff_id", db.statement)
+        self.assertEqual(db.parameters, {"exam_id": 17})
 
 
 if __name__ == "__main__":

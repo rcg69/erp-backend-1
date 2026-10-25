@@ -39,11 +39,14 @@ Authorization: Bearer <access_token>
 | DELETE | `/api/exams/{exam_id}/subjects/{exam_subject_id}` | Admin only | Remove a subject from a draft exam |
 | POST | `/api/exams/{exam_id}/schedule` | Admin only | Schedule a configured exam |
 | POST | `/api/exams/{exam_id}/publish` | Admin only | Publish completed results |
+| POST | `/api/exams/{exam_id}/publish-override` | Admin only | Publish entered marks for a scheduled exam before its normal completion |
 | GET | `/api/exams/{exam_id}/progress` | Admin only | Review subject evaluation progress |
 | GET | `/api/exams/assigned` | Assigned staff only | List the evaluator's assigned subjects |
 | GET | `/api/exams/assigned/subjects/{exam_subject_id}/roster?limit={limit}&offset={offset}` | Assigned staff only | Load a page of roster and marks |
 | PUT | `/api/exams/assigned/subjects/{exam_subject_id}/marks/{student_id}` | Assigned staff only | Enter/update marks while evaluation is open |
 | POST | `/api/exams/assigned/subjects/{exam_subject_id}/complete` | Assigned staff only | Complete and lock subject evaluation |
+| GET | `/api/exams/student?limit={limit}&offset={offset}` | Enrolled student | List the requesting student's scheduled, completed, and published exams |
+| GET | `/api/exams/student/{exam_id}/subjects` | Enrolled student | View subject mark allocations for an exam in the student's roster |
 | GET | `/api/exams/results/{exam_id}?limit={limit}&offset={offset}` | Admin; assigned staff; enrolled student | Review results or read published results |
 | PUT | `/api/exams/exam-subjects/{exam_subject_id}/marks/{student_id}/correction` | Admin only | Correct marks with a required audit reason |
 | GET | `/api/attendance?academic_year={academic_year}` | Authenticated | List attendance, optionally filtered by academic year |
@@ -659,6 +662,11 @@ PUT /api/exams/assigned/subjects/61/marks/203
 For an absent student, send `"marks_obtained": null` and `"is_absent": true`. Marks must be between zero and the subject maximum. Evaluators can complete a subject only after every roster student has a mark or an absence entry. Completed evaluations are locked; all completed subjects move the exam to `completed`.
 
 Admins can review progress using `GET /api/exams/{exam_id}/progress` and publish only after all students' subject results are complete using `POST /api/exams/{exam_id}/publish`. `GET /api/exams/results/{exam_id}` accepts optional pagination (`limit` defaults to 100; maximum 500). It returns all exam results to admins, only assigned subject results to assigned staff, and only the requesting student's result after publication. Admin corrections use `PUT /api/exams/exam-subjects/{exam_subject_id}/marks/{student_id}/correction` and require a non-blank reason; old and new values, actor, timestamp, and reason are stored in the marks audit log.
+
+Students can list exams in their own roster using `GET /api/exams/student`; the response excludes draft exams and is scoped to the authenticated student's linked profile. Published marks remain available only through the student-scoped results endpoint.
+Students can view configured subject maximum marks, passing marks, and exam dates using `GET /api/exams/student/{exam_id}/subjects`; access is limited to exams in their own roster.
+
+The standard admin publish action remains available after all evaluations are completed. Admins can instead use `POST /api/exams/{exam_id}/publish-override` on a scheduled exam after at least one mark has been entered. This publishes entered marks immediately; missing marks remain unavailable, and staff evaluation is locked.
 
 The schema bootstrap creates the exam, roster, subject assignment, marks, and audit tables automatically on startup.
 

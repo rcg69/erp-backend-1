@@ -164,6 +164,47 @@ def list_exams(
     return _dicts(rows)
 
 
+def list_student_exams(
+    db: Session,
+    student_id: int,
+    limit: int = 100,
+    offset: int = 0,
+):
+    rows = db.execute(
+        text(f"""
+            SELECT {EXAM_SELECT}
+            FROM exams e
+            JOIN exam_students x ON x.exam_id = e.id
+            WHERE x.student_id = :student_id
+              AND e.status IN ('scheduled', 'completed', 'published')
+            ORDER BY e.start_date DESC, e.id DESC
+            LIMIT :limit OFFSET :offset
+        """),
+        {
+            "student_id": student_id,
+            "limit": limit,
+            "offset": offset,
+        },
+    ).mappings().all()
+    return _dicts(rows)
+
+
+def list_student_exam_subjects(db: Session, exam_id: int):
+    rows = db.execute(
+        text("""
+            SELECT sub.id AS subject_id, sub.code AS subject_code,
+                   sub.name AS subject_name, es.max_marks, es.pass_marks,
+                   es.exam_date
+            FROM exam_subjects es
+            JOIN subjects sub ON sub.id = es.subject_id
+            WHERE es.exam_id = :exam_id
+            ORDER BY sub.name, sub.id
+        """),
+        {"exam_id": exam_id},
+    ).mappings().all()
+    return _dicts(rows)
+
+
 def update_exam(db: Session, exam_id: int, payload: dict):
     allowed = {"name", "description", "start_date", "end_date"}
     updates = {key: value for key, value in payload.items() if key in allowed}

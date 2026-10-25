@@ -12,6 +12,7 @@ from schemas.exam_schema import (
     ExamSubjectUpdate,
     ExamUpdate,
     MarksCorrection,
+    StudentExamSubjectResponse,
     StudentMarkEntry,
 )
 
@@ -619,6 +620,29 @@ def publish_exam(exam_id: int, db: Session):
         _raise_database_error(exc, "publication")
 
 
+def override_publish_exam(exam_id: int, db: Session):
+    try:
+        exam = _lock_exam(db, exam_id)
+        if exam["status"] != "scheduled":
+            raise HTTPException(
+                409, "Only a scheduled exam can be published early"
+            )
+        subjects = model.get_exam_subjects(db, exam_id)
+        if not subjects:
+            raise HTTPException(409, "Configure at least one subject before publishing")
+        if not any(subject["marked_count"] > 0 for subject in subjects):
+            raise HTTPException(409, "Enter at least one mark before publishing")
+        model.set_exam_status(db, exam_id, "published")
+        db.commit()
+        return _require_exam(db, exam_id)
+    except HTTPException:
+        db.rollback()
+        raise
+    except SQLAlchemyError as exc:
+        db.rollback()
+        _raise_database_error(exc, "early publication override")
+
+
 def get_exam_results(
     exam_id: int,
     current_user: dict,
@@ -707,3 +731,45 @@ def get_exam_results(
         raise
     except SQLAlchemyError as exc:
         _raise_database_error(exc, "results retrieval")
+
+
+def list_student_exams(
+    current_user: dict,
+    limit: int,
+    offset: int,
+    db: Session,
+):
+    try:
+        role = model.get_role_name(db, current_user.get("role_id"))
+        if role != "student":
+            raise HTTPException(403, "Student access required")
+        student_id = current_user.get("person_id")
+        if student_id is None:
+            raise HTTPException(403, "Student account is not linked to a student")
+        return model.list_student_exams(db, student_id, limit, offset)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        _raise_database_error(exc, "student exam listing")
+
+
+def list_student_exam_subjects(
+    exam_id: int,
+    current_user: dict,
+    db: Session,
+):
+    try:
+        role = model.get_role_name(db, current_user.get("role_id"))
+        if role != "student":
+            raise HTTPException(403, "Student access required")
+        student_id = current_user.get("person_id")
+        if student_id is None:
+            raise HTTPException(403, "Student account is not linked to a student")
+        exam = model.get_exam_ids_for_student(db, student_id, exam_id)
+        if exam is None or exam["status"] == "draft":
+            raise HTTPException(404, "Exam not found")
+        return model.list_student_exam_subjects(db, exam_id)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        _raise_database_error(exc, "student exam subjects retrieval")

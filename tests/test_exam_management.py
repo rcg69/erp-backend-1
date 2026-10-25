@@ -64,6 +64,162 @@ class ExamManagementTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.status_code, 422)
 
+    @patch.object(
+        exam_service.model,
+        "list_student_exams",
+        return_value=[{"id": 2, "status": "scheduled"}],
+    )
+    @patch.object(exam_service.model, "get_role_name", return_value="student")
+    def test_student_exam_list_is_scoped_to_linked_student(
+        self,
+        _get_role,
+        list_student_exams,
+    ):
+        result = exam_service.list_student_exams(
+            {"role_id": 4, "person_id": 45},
+            100,
+            0,
+            self.db,
+        )
+
+        self.assertEqual(result, [{"id": 2, "status": "scheduled"}])
+        list_student_exams.assert_called_once_with(self.db, 45, 100, 0)
+
+    @patch.object(exam_service.model, "list_student_exams")
+    @patch.object(exam_service.model, "get_role_name", return_value="staff")
+    def test_non_student_cannot_list_student_exams(
+        self,
+        _get_role,
+        list_student_exams,
+    ):
+        with self.assertRaises(HTTPException) as raised:
+            exam_service.list_student_exams(
+                {"role_id": 2, "person_id": 19},
+                100,
+                0,
+                self.db,
+            )
+
+        self.assertEqual(raised.exception.status_code, 403)
+        list_student_exams.assert_not_called()
+
+    @patch.object(exam_service, "_require_exam", return_value={"id": 2, "status": "published"})
+    @patch.object(exam_service.model, "set_exam_status")
+    @patch.object(
+        exam_service.model,
+        "get_exam_subjects",
+        return_value=[
+            {"marked_count": 2, "student_count": 10},
+            {"marked_count": 0, "student_count": 10},
+        ],
+    )
+    @patch.object(
+        exam_service,
+        "_lock_exam",
+        return_value={"id": 2, "status": "scheduled"},
+    )
+    def test_admin_override_publishes_entered_marks_before_evaluation_is_complete(
+        self,
+        _lock_exam,
+        _get_subjects,
+        set_exam_status,
+        _require_exam,
+    ):
+        result = exam_service.override_publish_exam(2, self.db)
+
+        self.assertEqual(result["status"], "published")
+        set_exam_status.assert_called_once_with(self.db, 2, "published")
+        self.assertEqual(self.db.commits, 1)
+
+    @patch.object(exam_service.model, "set_exam_status")
+    @patch.object(
+        exam_service.model,
+        "get_exam_subjects",
+        return_value=[{"marked_count": 0, "student_count": 10}],
+    )
+    @patch.object(
+        exam_service,
+        "_lock_exam",
+        return_value={"id": 2, "status": "scheduled"},
+    )
+    def test_admin_override_requires_at_least_one_entered_mark(
+        self,
+        _lock_exam,
+        _get_subjects,
+        set_exam_status,
+    ):
+        with self.assertRaises(HTTPException) as raised:
+            exam_service.override_publish_exam(2, self.db)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        set_exam_status.assert_not_called()
+        self.assertEqual(self.db.rollbacks, 1)
+
+    @patch.object(exam_service.model, "get_exam_subjects")
+    @patch.object(
+        exam_service,
+        "_lock_exam",
+        return_value={"id": 2, "status": "completed"},
+    )
+    def test_admin_override_is_only_available_for_scheduled_exams(
+        self,
+        _lock_exam,
+        get_subjects,
+    ):
+        with self.assertRaises(HTTPException) as raised:
+            exam_service.override_publish_exam(2, self.db)
+
+        self.assertEqual(raised.exception.status_code, 409)
+        get_subjects.assert_not_called()
+        self.assertEqual(self.db.rollbacks, 1)
+
+    @patch.object(
+        exam_service.model,
+        "list_student_exam_subjects",
+        return_value=[{"subject_id": 3, "max_marks": Decimal("100")}],
+    )
+    @patch.object(
+        exam_service.model,
+        "get_exam_ids_for_student",
+        return_value={"status": "scheduled"},
+    )
+    @patch.object(exam_service.model, "get_role_name", return_value="student")
+    def test_student_can_view_allocations_for_rostered_exam(
+        self,
+        _get_role,
+        get_student_exam,
+        list_subjects,
+    ):
+        result = exam_service.list_student_exam_subjects(
+            2,
+            {"role_id": 4, "person_id": 45},
+            self.db,
+        )
+
+        self.assertEqual(result, [{"subject_id": 3, "max_marks": Decimal("100")}])
+        get_student_exam.assert_called_once_with(self.db, 45, 2)
+        list_subjects.assert_called_once_with(self.db, 2)
+
+    @patch.object(exam_service.model, "list_student_exam_subjects")
+    @patch.object(exam_service.model, "get_exam_ids_for_student", return_value=None)
+    @patch.object(exam_service.model, "get_role_name", return_value="student")
+    def test_student_cannot_view_allocations_for_unrostered_exam(
+        self,
+        _get_role,
+        get_student_exam,
+        list_subjects,
+    ):
+        with self.assertRaises(HTTPException) as raised:
+            exam_service.list_student_exam_subjects(
+                2,
+                {"role_id": 4, "person_id": 45},
+                self.db,
+            )
+
+        self.assertEqual(raised.exception.status_code, 404)
+        get_student_exam.assert_called_once_with(self.db, 45, 2)
+        list_subjects.assert_not_called()
+
     @patch.object(exam_service.model, "create_exam")
     @patch.object(exam_service.model, "get_grade_class", return_value=None)
     def test_exam_creation_rejects_class_year_mismatch(

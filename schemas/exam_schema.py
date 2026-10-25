@@ -109,6 +109,15 @@ class ExamSubjectResponse(BaseModel):
     updated_at: datetime
 
 
+class StudentExamSubjectResponse(BaseModel):
+    subject_id: int
+    subject_code: str
+    subject_name: str
+    max_marks: Decimal
+    pass_marks: Decimal
+    exam_date: date | None = None
+
+
 class StudentMarkEntry(BaseModel):
     marks_obtained: Decimal | None = Field(
         default=None, ge=0, max_digits=8, decimal_places=2
