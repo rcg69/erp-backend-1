@@ -240,7 +240,9 @@ def get_user_image(image_id: int, db: Session) -> dict:
         ).mappings().first()
         if not image:
             raise HTTPException(status_code=404, detail="Profile image not found")
-        return UserImageRecord.model_validate(dict(image)).model_dump()
+        image_record = dict(image)
+        image_record["image_data"] = bytes(image_record["image_data"])
+        return UserImageRecord.model_validate(image_record).model_dump()
     except HTTPException:
         raise
     except Exception as exc:

@@ -92,6 +92,18 @@ class UserImageTests(unittest.TestCase):
         self.assertEqual(image["content_type"], "image/png")
         self.assertIn("created_at", image)
 
+    def test_get_image_converts_database_memoryview_to_bytes(self):
+        db = _ImageSession(
+            "staff",
+            {"id": 8, "person_id": 12, "role_name": "staff"},
+        )
+        db.read_image_row["image_data"] = memoryview(b"\x89PNG\r\n\x1a\n")
+
+        image = get_user_image(23, db)
+
+        self.assertIsInstance(image["image_data"], bytes)
+        self.assertEqual(image["image_data"], b"\x89PNG\r\n\x1a\n")
+
     def test_validates_mime_type_and_image_signature(self):
         image = b"\x89PNG\r\n\x1a\nimage bytes"
 
