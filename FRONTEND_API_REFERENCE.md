@@ -27,6 +27,25 @@ Authorization: Bearer <access_token>
 | PATCH | `/api/user-details/{user_id}` | Admin; staff assigned to a student | Update a user's profile |
 | PUT | `/api/user-images/users/{user_id}` | Admin; staff updating their own image; assigned teacher updating a student in their assigned class | Upload or replace a profile image |
 | GET | `/api/user-images/{image_id}` | Authenticated | Load an image by its ID |
+| POST | `/api/exams` | Admin only | Create an exam for an existing class/year |
+| GET | `/api/exams` | Admin only | List/filter exams |
+| GET | `/api/exams/{exam_id}` | Admin only | Retrieve an exam |
+| PUT | `/api/exams/{exam_id}` | Admin only | Edit a draft exam |
+| DELETE | `/api/exams/{exam_id}` | Admin only | Delete a draft exam with no marks |
+| POST | `/api/exams/{exam_id}/roster/sync` | Admin only | Add newly active students to a draft exam roster |
+| POST | `/api/exams/{exam_id}/subjects` | Admin only | Configure a subject and evaluator |
+| GET | `/api/exams/{exam_id}/subjects` | Admin only | List configured subjects and progress |
+| PUT | `/api/exams/{exam_id}/subjects/{exam_subject_id}` | Admin only | Edit subject settings or evaluator |
+| DELETE | `/api/exams/{exam_id}/subjects/{exam_subject_id}` | Admin only | Remove a subject from a draft exam |
+| POST | `/api/exams/{exam_id}/schedule` | Admin only | Schedule a configured exam |
+| POST | `/api/exams/{exam_id}/publish` | Admin only | Publish completed results |
+| GET | `/api/exams/{exam_id}/progress` | Admin only | Review subject evaluation progress |
+| GET | `/api/exams/assigned` | Assigned staff only | List the evaluator's assigned subjects |
+| GET | `/api/exams/assigned/subjects/{exam_subject_id}/roster?limit={limit}&offset={offset}` | Assigned staff only | Load a page of roster and marks |
+| PUT | `/api/exams/assigned/subjects/{exam_subject_id}/marks/{student_id}` | Assigned staff only | Enter/update marks while evaluation is open |
+| POST | `/api/exams/assigned/subjects/{exam_subject_id}/complete` | Assigned staff only | Complete and lock subject evaluation |
+| GET | `/api/exams/results/{exam_id}?limit={limit}&offset={offset}` | Admin; assigned staff; enrolled student | Review results or read published results |
+| PUT | `/api/exams/exam-subjects/{exam_subject_id}/marks/{student_id}/correction` | Admin only | Correct marks with a required audit reason |
 | GET | `/api/attendance?academic_year={academic_year}` | Authenticated | List attendance, optionally filtered by academic year |
 | GET | `/api/attendance/student-report?roll_number={roll_number}&academic_year={academic_year}` | Public | Get a student's attendance for the selected academic year |
 | GET | `/api/attendance/teacher/classes` | Staff only | Get the signed-in teacher's assigned classes for a date |
@@ -581,5 +600,66 @@ GET /api/attendance/student-report?roll_number=STU-101&academic_year=2025-2026
 ```
 
 The response includes the selected `academic_year`. Each attendance record also includes its academic year. The report counts and percentage only include records from the selected year.
+
+## Exams and marks
+
+All exam creation, editing, subject configuration, scheduling, publication, deletion, roster synchronization, and mark corrections require an authenticated admin. The `grade_id` identifies the existing active class row (grade, section, and academic year). At exam creation, the backend snapshots active students matching that class. While the exam is a draft, an admin can refresh the snapshot with `POST /api/exams/{exam_id}/roster/sync`; this adds newly eligible students without removing historical roster entries.
+
+Create an exam:
+
+```http
+POST /api/exams
+Authorization: Bearer <access_token>
+Content-Type: application/json
+```
+
+```json
+{
+  "name": "Quarterly Examination",
+  "academic_year": "2026-2027",
+  "grade_id": 12,
+  "description": "Term one assessment",
+  "start_date": "2026-10-12",
+  "end_date": "2026-10-20"
+}
+```
+
+Multiple exams may use the same class and academic year. Each exam subject is configured independently and has one assigned active staff evaluator:
+
+```http
+POST /api/exams/42/subjects
+```
+
+```json
+{
+  "subject_id": 5,
+  "max_marks": 100,
+  "pass_marks": 35,
+  "exam_date": "2026-10-14",
+  "evaluator_staff_id": 18
+}
+```
+
+Configure all subjects and assigned evaluators before scheduling. Exam details and subject marks/date settings can only be edited while the exam is a draft. An admin may reassign a scheduled subject's evaluator until that subject's evaluation is completed. Subject entries cannot be duplicated within an exam. Schedule using `POST /api/exams/{exam_id}/schedule`; the exam must have configured subjects and a non-empty roster.
+
+Evaluators call `GET /api/exams/assigned` to list their assignments and load their roster with `GET /api/exams/assigned/subjects/{exam_subject_id}/roster`. Roster rows include any existing mark and absence status. Enter or update a student's marks with:
+
+```http
+PUT /api/exams/assigned/subjects/61/marks/203
+```
+
+```json
+{
+  "marks_obtained": 78.5,
+  "is_absent": false,
+  "remarks": "Optional note"
+}
+```
+
+For an absent student, send `"marks_obtained": null` and `"is_absent": true`. Marks must be between zero and the subject maximum. Evaluators can complete a subject only after every roster student has a mark or an absence entry. Completed evaluations are locked; all completed subjects move the exam to `completed`.
+
+Admins can review progress using `GET /api/exams/{exam_id}/progress` and publish only after all students' subject results are complete using `POST /api/exams/{exam_id}/publish`. `GET /api/exams/results/{exam_id}` accepts optional pagination (`limit` defaults to 100; maximum 500). It returns all exam results to admins, only assigned subject results to assigned staff, and only the requesting student's result after publication. Admin corrections use `PUT /api/exams/exam-subjects/{exam_subject_id}/marks/{student_id}/correction` and require a non-blank reason; old and new values, actor, timestamp, and reason are stored in the marks audit log.
+
+The schema bootstrap creates the exam, roster, subject assignment, marks, and audit tables automatically on startup.
 
 When creating or updating users, `person_id` must reference an existing student for student accounts or an existing staff record for `staff` accounts.

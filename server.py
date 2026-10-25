@@ -14,6 +14,7 @@ from api.user_details_api import router as user_details_router
 from api.user_image_api import router as user_image_router
 from database import ensure_database_schema
 from api.subject_api import router as subject_router
+from api.exam_api import router as exam_router
 app = FastAPI(
     title="Student ERP API"
 )
@@ -54,3 +55,4 @@ app.include_router(user_image_router)
 app.include_router(auth_router)
 app.include_router(roles_router)
 app.include_router(subject_router)
+app.include_router(exam_router)

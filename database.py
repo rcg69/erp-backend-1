@@ -1097,6 +1097,222 @@ def ensure_database_schema() -> None:
         )
 
         # =========================================================
+        # EXAMS AND MARKS
+        # =========================================================
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS exams (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(150) NOT NULL,
+                    academic_year VARCHAR(20) NOT NULL,
+                    grade_id INTEGER NOT NULL
+                        REFERENCES grades(id)
+                        ON DELETE RESTRICT,
+                    grade_name VARCHAR(20) NOT NULL,
+                    section_id INTEGER NOT NULL
+                        REFERENCES sections(id)
+                        ON DELETE RESTRICT,
+                    section_name VARCHAR(10) NOT NULL,
+                    description TEXT,
+                    start_date DATE NOT NULL,
+                    end_date DATE NOT NULL,
+                    status VARCHAR(20) NOT NULL DEFAULT 'draft',
+                    created_by INTEGER NOT NULL
+                        REFERENCES users(id)
+                        ON DELETE RESTRICT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT ck_exam_date_range
+                        CHECK (end_date >= start_date),
+                    CONSTRAINT ck_exam_status
+                        CHECK (
+                            status IN (
+                                'draft',
+                                'scheduled',
+                                'completed',
+                                'published'
+                            )
+                        )
+                )
+                """
+            )
+        )
+
+        # Older installations may already have exams from an earlier
+        # schema version that stored only grade_id. Add the class snapshot
+        # fields in place and backfill them from the existing relationships.
+        connection.execute(
+            text(
+                """
+                ALTER TABLE exams
+                ADD COLUMN IF NOT EXISTS grade_name VARCHAR(20)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                ALTER TABLE exams
+                ADD COLUMN IF NOT EXISTS section_id INTEGER
+                    REFERENCES sections(id)
+                    ON DELETE RESTRICT
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                ALTER TABLE exams
+                ADD COLUMN IF NOT EXISTS section_name VARCHAR(10)
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE exams e
+                SET
+                    grade_name = g.grade,
+                    section_id = g.section_id,
+                    section_name = sec.section
+                FROM grades g
+                LEFT JOIN sections sec ON sec.id = g.section_id
+                WHERE e.grade_id = g.id
+                  AND (
+                      e.grade_name IS NULL
+                      OR e.section_id IS NULL
+                      OR e.section_name IS NULL
+                  )
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS exam_students (
+                    exam_id INTEGER NOT NULL
+                        REFERENCES exams(id)
+                        ON DELETE CASCADE,
+                    student_id INTEGER NOT NULL
+                        REFERENCES students(id)
+                        ON DELETE RESTRICT,
+                    added_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (exam_id, student_id)
+                )
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS exam_subjects (
+                    id SERIAL PRIMARY KEY,
+                    exam_id INTEGER NOT NULL
+                        REFERENCES exams(id)
+                        ON DELETE CASCADE,
+                    subject_id INTEGER NOT NULL
+                        REFERENCES subjects(id)
+                        ON DELETE RESTRICT,
+                    max_marks NUMERIC(8, 2) NOT NULL,
+                    pass_marks NUMERIC(8, 2) NOT NULL,
+                    exam_date DATE,
+                    evaluator_staff_id INTEGER NOT NULL
+                        REFERENCES staff(id)
+                        ON DELETE RESTRICT,
+                    evaluation_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_exam_subject
+                        UNIQUE (exam_id, subject_id),
+                    CONSTRAINT ck_exam_subject_marks
+                        CHECK (
+                            max_marks > 0
+                            AND pass_marks >= 0
+                            AND pass_marks <= max_marks
+                        ),
+                    CONSTRAINT ck_exam_evaluation_status
+                        CHECK (
+                            evaluation_status IN (
+                                'pending',
+                                'in_progress',
+                                'completed'
+                            )
+                        )
+                )
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS student_marks (
+                    id SERIAL PRIMARY KEY,
+                    exam_subject_id INTEGER NOT NULL
+                        REFERENCES exam_subjects(id)
+                        ON DELETE RESTRICT,
+                    student_id INTEGER NOT NULL
+                        REFERENCES students(id)
+                        ON DELETE RESTRICT,
+                    marks_obtained NUMERIC(8, 2),
+                    is_absent BOOLEAN NOT NULL DEFAULT FALSE,
+                    remarks TEXT,
+                    created_by INTEGER NOT NULL
+                        REFERENCES users(id)
+                        ON DELETE RESTRICT,
+                    updated_by INTEGER NOT NULL
+                        REFERENCES users(id)
+                        ON DELETE RESTRICT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_exam_subject_student_mark
+                        UNIQUE (exam_subject_id, student_id),
+                    CONSTRAINT ck_student_mark_value
+                        CHECK (
+                            (is_absent AND marks_obtained IS NULL)
+                            OR (
+                                NOT is_absent
+                                AND marks_obtained IS NOT NULL
+                                AND marks_obtained >= 0
+                            )
+                        )
+                )
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS student_marks_audit (
+                    id BIGSERIAL PRIMARY KEY,
+                    student_mark_id INTEGER NOT NULL
+                        REFERENCES student_marks(id)
+                        ON DELETE RESTRICT,
+                    action VARCHAR(20) NOT NULL,
+                    previous_marks NUMERIC(8, 2),
+                    previous_is_absent BOOLEAN,
+                    previous_remarks TEXT,
+                    new_marks NUMERIC(8, 2),
+                    new_is_absent BOOLEAN NOT NULL,
+                    new_remarks TEXT,
+                    reason TEXT,
+                    changed_by INTEGER NOT NULL
+                        REFERENCES users(id)
+                        ON DELETE RESTRICT,
+                    changed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT ck_marks_audit_action
+                        CHECK (action IN ('created', 'updated', 'correction'))
+                )
+                """
+            )
+        )
+
+        # =========================================================
         # INDEXES
         # =========================================================
         #
@@ -1173,6 +1389,42 @@ def ensure_database_schema() -> None:
                 """
                 CREATE INDEX IF NOT EXISTS idx_attendance_academic_year_student
                 ON attendance(academic_year, student_id)
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_exams_grade_year
+                ON exams(grade_id, academic_year, start_date)
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_exam_subjects_evaluator
+                ON exam_subjects(evaluator_staff_id, evaluation_status)
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_student_marks_student
+                ON student_marks(student_id, exam_subject_id)
+                """
+            )
+        )
+
+        connection.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_student_marks_audit_mark_changed
+                ON student_marks_audit(student_mark_id, changed_at DESC)
                 """
             )
         )
