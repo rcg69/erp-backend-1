@@ -12,6 +12,18 @@ The API is served by `server.py`. Unless an endpoint is marked **Public**, send 
 Authorization: Bearer <access_token>
 ```
 
+Grade, section, subject, timetable, and school-wide attendance reads require an Admin or active Staff account. Student requests to the attendance list are restricted to their own records, and Students have separate own-class session and attendance-report endpoints. Grade, section, subject, and timetable configuration changes require Admin access. Staff may update `is_conducted` and `remarks` only for a class session assigned to their staff profile; creating, reassigning, or deleting sessions remains Admin-only. This authorization is enforced by the backend even if a frontend route or button is hidden. `/health`, login, refresh, and logout are the public/session endpoints.
+
+Students use `GET /api/scheduling/student/sessions` for their own class sessions and `GET /api/attendance/me` for their attendance report. Both endpoints derive the student record from the authenticated account; clients must not send another student ID or roll number.
+
+The existing `GET /api/scheduling/sessions` and `/api/scheduling/sessions/by-class` routes also accept Student accounts. They return only the signed-in student's active class; a student cannot use grade or section query parameters to inspect another class. The legacy attendance report accepts a Student token only when the supplied roll number belongs to that same account.
+
+Errors use a stable envelope and carry the same correlation ID in the `X-Request-ID` response header:
+
+```json
+{"error":{"code":"NOT_FOUND","message":"Resource not found","request_id":"server-generated-uuid"}}
+```
+
 ## Endpoint Summary
 
 | Method | Endpoint | Access | Frontend use |
@@ -49,8 +61,11 @@ Authorization: Bearer <access_token>
 | GET | `/api/exams/student/{exam_id}/subjects` | Enrolled student | View subject mark allocations for an exam in the student's roster |
 | GET | `/api/exams/results/{exam_id}?limit={limit}&offset={offset}` | Admin; assigned staff; enrolled student | Review results or read published results |
 | PUT | `/api/exams/exam-subjects/{exam_subject_id}/marks/{student_id}/correction` | Admin only | Correct marks with a required audit reason |
-| GET | `/api/attendance?academic_year={academic_year}` | Authenticated | List attendance, optionally filtered by academic year |
-| GET | `/api/attendance/student-report?roll_number={roll_number}&academic_year={academic_year}` | Public | Get a student's attendance for the selected academic year |
+| GET | `/api/scheduling/student/sessions?session_date={YYYY-MM-DD}` | Student only | View the signed-in student's class sessions for a date |
+| GET | `/api/scheduling/sessions` | Admin or Staff; Student sees own class only | List class sessions |
+| GET | `/api/attendance?academic_year={academic_year}` | Admin or Staff; Student sees own records only | List attendance, optionally filtered by academic year |
+| GET | `/api/attendance/student-report?roll_number={roll_number}&academic_year={academic_year}` | Admin or Staff; Student may request own roll only | Get a student's attendance report |
+| GET | `/api/attendance/me?academic_year={academic_year}` | Student only | Load the signed-in student's own attendance |
 | GET | `/api/attendance/teacher/classes` | Staff only | Get the signed-in teacher's assigned classes for a date |
 | GET | `/api/attendance/teacher/sessions/{session_id}/roster` | Staff only | Load the class roster and existing attendance |
 | PUT | `/api/attendance/teacher/sessions/{session_id}/attendance` | Assigned staff only | Save or update attendance for that class session |

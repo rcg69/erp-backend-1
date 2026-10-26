@@ -80,6 +80,19 @@ def get_students_by_ids(db: Session, student_ids: list[int]):
     return _dicts(rows)
 
 
+def get_student_by_id(db: Session, student_id: int):
+    row = db.execute(
+        text("""
+            SELECT id, name, roll_number, section, grade
+            FROM students
+            WHERE id = :student_id
+              AND LOWER(status) = 'active'
+        """),
+        {"student_id": student_id},
+    ).mappings().first()
+    return _dict(row)
+
+
 def get_students_by_section(db: Session, section: str):
     rows = db.execute(
         text("""
@@ -171,16 +184,21 @@ def get_attendance_report_records(
     return _dicts(rows)
 
 
-def get_all_attendance(db: Session, academic_year: str | None = None):
+def get_all_attendance(
+    db: Session,
+    academic_year: str | None = None,
+    student_id: int | None = None,
+):
     rows = db.execute(
         text(f"""
             SELECT {ATTENDANCE_COLUMNS}
             FROM attendance
-            WHERE CAST(:academic_year AS VARCHAR) IS NULL
-               OR academic_year = :academic_year
+            WHERE (CAST(:academic_year AS VARCHAR) IS NULL
+                   OR academic_year = :academic_year)
+            AND (CAST(:student_id AS INTEGER) IS NULL OR student_id = :student_id)
             ORDER BY id DESC
         """),
-        {"academic_year": academic_year},
+        {"academic_year": academic_year, "student_id": student_id},
     ).mappings().all()
     return _dicts(rows)
 

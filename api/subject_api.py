@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from database import get_db
+from security.auth import require_admin, require_admin_or_staff
 from schemas.subject_schema import (
     SubjectCreate,
     SubjectResponse,
@@ -24,6 +25,7 @@ router = APIRouter(
 def create_subject(
     subject_data: SubjectCreate,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return subject_service.create_subject(
         subject_data,
@@ -37,6 +39,7 @@ def create_subject(
 )
 def get_subjects(
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return subject_service.get_subjects(db)
 
@@ -48,6 +51,7 @@ def get_subjects(
 def get_subject(
     subject_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return subject_service.get_subject(
         subject_id,
@@ -63,6 +67,7 @@ def update_subject(
     subject_id: int,
     subject_data: SubjectUpdate,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return subject_service.update_subject(
         subject_id,
@@ -75,6 +80,7 @@ def update_subject(
 def delete_subject(
     subject_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return subject_service.delete_subject(
         subject_id,

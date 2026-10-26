@@ -134,6 +134,63 @@ def require_staff(
     return current_user
 
 
+def require_student(
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    person_id = current_user.get("person_id")
+    if person_id is None:
+        raise HTTPException(status_code=403, detail="Student account is not linked to a student")
+
+    try:
+        student = db.execute(
+            text(
+                """
+                SELECT s.id
+                FROM users u
+                JOIN roles r ON r.role_id = u.role_id
+                JOIN students s ON s.id = u.person_id
+                WHERE u.id = :user_id
+                  AND LOWER(r.role_name) = 'student'
+                  AND LOWER(s.status) = 'active'
+                LIMIT 1
+                """
+            ),
+            {"user_id": current_user["id"]},
+        ).first()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Authorization service unavailable") from exc
+
+    if not student:
+        raise HTTPException(status_code=403, detail="Active student access required")
+
+    current_user["role"] = "student"
+    return current_user
+
+
+def require_admin_staff_or_student(
+    current_user: dict[str, Any] = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    try:
+        role = db.execute(
+            text("SELECT role_name FROM roles WHERE role_id = :role_id LIMIT 1"),
+            {"role_id": current_user.get("role_id")},
+        ).mappings().first()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="Authorization service unavailable") from exc
+
+    role_name = str(role.get("role_name", "")).strip().lower() if role else ""
+    if role_name == "admin":
+        current_user["role"] = "admin"
+        return current_user
+    if role_name in {"staff", "teacher"}:
+        return require_staff(current_user, db)
+    if role_name == "student":
+        return require_student(current_user, db)
+    raise HTTPException(status_code=403, detail="Access denied")
+
+
 def require_admin_or_staff(
     current_user: dict[str, Any] = Depends(get_current_user),
     db: Session = Depends(get_db),

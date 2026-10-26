@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 
 from database import get_db
+from security.auth import require_admin, require_admin_or_staff
 from schemas.section_schema import (
     SectionCreate,
     SectionResponse,
@@ -24,6 +25,7 @@ router = APIRouter(
 def create_section(
     section_data: SectionCreate,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return section_service.create_section(
         section_data,
@@ -37,6 +39,7 @@ def create_section(
 )
 def get_sections(
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return section_service.get_sections(db)
 
@@ -48,6 +51,7 @@ def get_sections(
 def get_section(
     section_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return section_service.get_section(
         section_id,
@@ -63,6 +67,7 @@ def update_section(
     section_id: int,
     section_data: SectionUpdate,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return section_service.update_section(
         section_id,
@@ -75,6 +80,7 @@ def update_section(
 def delete_section(
     section_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return section_service.delete_section(
         section_id,

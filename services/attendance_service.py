@@ -150,14 +150,23 @@ def create_attendance(data: AttendanceCreate, db: Session):
         _raise_database_error(exc, "creation")
 
 
-def get_attendance(db: Session, academic_year: str | None = None):
+def get_attendance(
+    db: Session,
+    academic_year: str | None = None,
+    current_user: dict | None = None,
+):
     if academic_year is not None:
         academic_year = academic_year.strip()
         if not academic_year:
             raise HTTPException(400, "Enter an academic year")
 
     try:
-        return model.get_all_attendance(db, academic_year)
+        student_id = (
+            current_user.get("person_id")
+            if current_user and current_user.get("role") == "student"
+            else None
+        )
+        return model.get_all_attendance(db, academic_year, student_id)
     except SQLAlchemyError as exc:
         _raise_database_error(exc, "listing")
 
@@ -274,6 +283,7 @@ def get_student_attendance_report(
     section_id: int | None,
     academic_year: str | None,
     db: Session,
+    current_user: dict | None = None,
 ):
     roll_number = roll_number.strip()
     if not roll_number:
@@ -286,7 +296,14 @@ def get_student_attendance_report(
         )
 
     try:
-        candidates = model.get_student_candidates_by_roll(db, roll_number)
+        if current_user and current_user.get("role") == "student":
+            student_id = current_user.get("person_id")
+            student = model.get_student_by_id(db, student_id) if student_id else None
+            if not student or str(student.get("roll_number", "")).strip().lower() != roll_number.lower():
+                raise HTTPException(404, "Attendance report not found")
+            candidates = [student]
+        else:
+            candidates = model.get_student_candidates_by_roll(db, roll_number)
 
         if grade_id is not None and section_id is not None:
             klass = model.get_class(db, grade_id, section_id)
@@ -334,33 +351,66 @@ def get_student_attendance_report(
             db, student["id"], academic_year
         )
 
-        counts = Counter(str(row["status"]).upper() for row in records)
-        total = len(records)
-        attended = counts["PRESENT"] + counts["LATE"]
-
-        return {
-            "academic_year": academic_year,
-            "student": {
-                "id": student["id"],
-                "name": student.get("name"),
-                "roll_number": student.get("roll_number"),
-                "grade": student.get("grade"),
-                "section": student.get("section"),
-            },
-            "total_classes": total,
-            "attended_classes": attended,
-            "present": counts["PRESENT"],
-            "absent": counts["ABSENT"],
-            "late": counts["LATE"],
-            "excused": counts["EXCUSED"],
-            "percentage": round(attended * 100 / total, 1) if total else 0.0,
-            "records": records,
-        }
+        return _build_attendance_report(student, academic_year, records)
 
     except HTTPException:
         raise
     except SQLAlchemyError as exc:
         _raise_database_error(exc, "report generation")
+
+
+def get_my_attendance_report(
+    student_id: int,
+    academic_year: str | None,
+    db: Session,
+):
+    try:
+        student = model.get_student_by_id(db, student_id)
+        if student is None:
+            raise HTTPException(404, "Student not found")
+
+        if academic_year is None:
+            current_years = model.get_current_academic_year_for_student(db, student)
+            if not current_years:
+                raise HTTPException(409, "No active academic year is configured for this student's class")
+            if len(current_years) > 1:
+                raise HTTPException(409, "Multiple active academic years are configured for this student's class; provide academic_year")
+            academic_year = current_years[0]
+        else:
+            academic_year = academic_year.strip()
+            if not academic_year:
+                raise HTTPException(400, "Enter an academic year")
+
+        records = model.get_attendance_report_records(db, student_id, academic_year)
+        return _build_attendance_report(student, academic_year, records)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        _raise_database_error(exc, "student attendance retrieval")
+
+
+def _build_attendance_report(student: dict, academic_year: str, records: list[dict]):
+    counts = Counter(str(row["status"]).upper() for row in records)
+    total = len(records)
+    attended = counts["PRESENT"] + counts["LATE"]
+    return {
+        "academic_year": academic_year,
+        "student": {
+            "id": student["id"],
+            "name": student.get("name"),
+            "roll_number": student.get("roll_number"),
+            "grade": student.get("grade"),
+            "section": student.get("section"),
+        },
+        "total_classes": total,
+        "attended_classes": attended,
+        "present": counts["PRESENT"],
+        "absent": counts["ABSENT"],
+        "late": counts["LATE"],
+        "excused": counts["EXCUSED"],
+        "percentage": round(attended * 100 / total, 1) if total else 0.0,
+        "records": records,
+    }
 
 
 def update_attendance(

@@ -65,6 +65,16 @@ SESSION_COLUMNS = """
     remarks
 """
 
+SESSION_COLUMNS_WITH_ALIAS = """
+    cs.id,
+    cs.timetable_id,
+    cs.subject_id,
+    cs.staff_id,
+    cs.session_date,
+    cs.is_conducted,
+    cs.remarks
+"""
+
 
 # =========================================================
 # SESSION GENERATION HELPER
@@ -980,16 +990,38 @@ def create_class_session(
         ) from exc
 
 
-def get_class_sessions(db: Session):
+def get_class_sessions(db: Session, current_user: dict | None = None):
     try:
+        student_filter = ""
+        params = {}
+        if current_user and current_user.get("role") == "student":
+            student_filter = """
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM students s
+                    JOIN sections sec
+                      ON LOWER(TRIM(sec.section)) = LOWER(TRIM(s.section))
+                    JOIN grades g
+                      ON g.section_id = sec.id
+                     AND LOWER(TRIM(g.grade)) = LOWER(TRIM(s.grade))
+                    WHERE s.id = :student_id
+                      AND LOWER(s.status) = 'active'
+                      AND LOWER(g.status) = 'active'
+                      AND g.id = t.grade_id
+                      AND sec.id = t.section_id
+                )
+            """
+            params["student_id"] = current_user["person_id"]
         rows = db.execute(
             text(
                 f"""
-                SELECT {SESSION_COLUMNS}
-                FROM class_sessions
-                ORDER BY session_date DESC, id DESC
+                SELECT {SESSION_COLUMNS_WITH_ALIAS}
+                FROM class_sessions cs
+                JOIN timetables t ON t.id = cs.timetable_id
+                {student_filter}
+                ORDER BY cs.session_date DESC, cs.id DESC
                 """
-            )
+            ), params
         ).mappings().all()
 
         return [dict(row) for row in rows]
@@ -1006,10 +1038,39 @@ def get_sessions_for_class_on_date(
     section_id: int,
     session_date: date,
     db: Session,
+    current_user: dict | None = None,
 ):
     day_of_week = session_date.isoweekday()
 
     try:
+        if current_user and current_user.get("role") == "student":
+            is_own_class = db.execute(
+                text(
+                    """
+                    SELECT 1
+                    FROM students s
+                    JOIN grades g
+                      ON LOWER(TRIM(g.grade)) = LOWER(TRIM(s.grade))
+                    JOIN sections sec
+                      ON sec.id = g.section_id
+                     AND LOWER(TRIM(sec.section)) = LOWER(TRIM(s.section))
+                    WHERE s.id = :student_id
+                      AND LOWER(s.status) = 'active'
+                      AND LOWER(g.status) = 'active'
+                      AND g.id = :grade_id
+                      AND sec.id = :section_id
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "student_id": current_user["person_id"],
+                    "grade_id": grade_id,
+                    "section_id": section_id,
+                },
+            ).first()
+            if not is_own_class:
+                raise HTTPException(404, "Class sessions not found")
+
         slots = db.execute(
             text(
                 f"""
@@ -1140,6 +1201,50 @@ def get_sessions_for_class_on_date(
     }
 
 
+def get_student_sessions_for_date(
+    student_id: int,
+    session_date: date,
+    db: Session,
+):
+    try:
+        class_rows = db.execute(
+            text(
+                """
+                SELECT g.id AS grade_id, sec.id AS section_id
+                FROM students s
+                JOIN sections sec
+                  ON LOWER(TRIM(sec.section)) = LOWER(TRIM(s.section))
+                JOIN grades g
+                  ON g.section_id = sec.id
+                 AND LOWER(TRIM(g.grade)) = LOWER(TRIM(s.grade))
+                WHERE s.id = :student_id
+                  AND LOWER(s.status) = 'active'
+                  AND LOWER(g.status) = 'active'
+                ORDER BY g.academic_year DESC, g.id DESC
+                LIMIT 2
+                """
+            ),
+            {"student_id": student_id},
+        ).mappings().all()
+        if not class_rows:
+            raise HTTPException(404, "No active class is linked to this student")
+        if len(class_rows) > 1:
+            raise HTTPException(409, "Multiple active classes are linked to this student")
+
+        klass = class_rows[0]
+        return get_sessions_for_class_on_date(
+            klass["grade_id"], klass["section_id"], session_date, db
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Scheduling service unavailable",
+        ) from exc
+
+
 def get_class_session(
     session_id: int,
     db: Session,
@@ -1170,7 +1275,33 @@ def update_class_session(
     session_id: int,
     session_data: ClassSessionUpdate,
     db: Session,
+    current_user: dict | None = None,
 ):
+    if current_user and current_user.get("role") == "staff":
+        allowed_staff_fields = {"is_conducted", "remarks"}
+        if session_data.model_fields_set - allowed_staff_fields:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Staff may only update conducted status and remarks",
+            )
+
+        assigned_session = db.execute(
+            text(
+                """
+                SELECT id
+                FROM class_sessions
+                WHERE id = :session_id
+                  AND staff_id = :staff_id
+                """
+            ),
+            {"session_id": session_id, "staff_id": current_user.get("person_id")},
+        ).first()
+        if not assigned_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Class session not found",
+            )
+
     payload = {
         "timetable_id": session_data.timetable_id,
         "subject_id": session_data.subject_id,

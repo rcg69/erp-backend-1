@@ -1,5 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from exceptions.handlers import register_exception_handlers
+from middleware.request_id import RequestIDMiddleware
 from api.scheduling_api import router as scheduling_router
 from api.attendance_api import router as attendance_router
 from api.auth_api import router as auth_router
@@ -18,6 +20,8 @@ from api.exam_api import router as exam_router
 app = FastAPI(
     title="Student ERP API"
 )
+register_exception_handlers(app)
+app.add_middleware(RequestIDMiddleware)
 
 
 @app.on_event("startup")

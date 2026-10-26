@@ -4,6 +4,12 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from database import get_db
+from security.auth import (
+    require_admin,
+    require_admin_or_staff,
+    require_admin_staff_or_student,
+    require_student,
+)
 
 from schemas.timetable_schema import (
     TimetableAssignment,
@@ -42,6 +48,7 @@ router = APIRouter(
 def open_timetable(
     open_data: TimetableOpenRequest,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return scheduling_service.open_timetable(
         open_data,
@@ -57,6 +64,7 @@ def assign_timetable_slot(
     timetable_id: int,
     assignment: TimetableAssignment,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return scheduling_service.assign_timetable_slot(
         timetable_id,
@@ -73,6 +81,7 @@ def assign_timetable_slot(
 def create_timetable(
     timetable_data: TimetableCreate,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return scheduling_service.create_timetable(
         timetable_data,
@@ -88,6 +97,7 @@ def get_timetables(
     grade_id: int | None = Query(default=None),
     section_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return scheduling_service.get_timetables(
         grade_id,
@@ -103,6 +113,7 @@ def get_timetables(
 def get_timetable(
     timetable_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return scheduling_service.get_timetable(
         timetable_id,
@@ -118,6 +129,7 @@ def update_timetable(
     timetable_id: int,
     timetable_data: TimetableUpdate,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return scheduling_service.update_timetable(
         timetable_id,
@@ -132,6 +144,7 @@ def update_timetable(
 def delete_timetable(
     timetable_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return scheduling_service.delete_timetable(
         timetable_id,
@@ -151,6 +164,7 @@ def delete_timetable(
 def generate_class_sessions(
     generate_data: SessionGenerateRequest,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return scheduling_service.generate_class_sessions(
         generate_data,
@@ -166,6 +180,7 @@ def generate_class_sessions(
 def create_class_session(
     session_data: ClassSessionCreate,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return scheduling_service.create_class_session(
         session_data,
@@ -178,10 +193,12 @@ def create_class_session(
     response_model=list[ClassSessionResponse],
 )
 def get_class_sessions(
+    current_user=Depends(require_admin_staff_or_student),
     db: Session = Depends(get_db),
 ):
     return scheduling_service.get_class_sessions(
         db,
+        current_user=current_user,
     )
 
 
@@ -194,12 +211,28 @@ def get_sessions_for_class_on_date(
     section_id: int = Query(...),
     session_date: date = Query(...),
     db: Session = Depends(get_db),
+    current_user=Depends(require_admin_staff_or_student),
 ):
     return scheduling_service.get_sessions_for_class_on_date(
         grade_id,
         section_id,
         session_date,
         db,
+        current_user=current_user,
+    )
+
+
+@router.get(
+    "/student/sessions",
+    response_model=ClassDaySessionsResponse,
+)
+def get_my_class_sessions(
+    session_date: date = Query(default_factory=date.today),
+    current_user=Depends(require_student),
+    db: Session = Depends(get_db),
+):
+    return scheduling_service.get_student_sessions_for_date(
+        current_user["person_id"], session_date, db
     )
 
 
@@ -210,6 +243,7 @@ def get_sessions_for_class_on_date(
 def get_class_session(
     session_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return scheduling_service.get_class_session(
         session_id,
@@ -224,12 +258,14 @@ def get_class_session(
 def update_class_session(
     session_id: int,
     session_data: ClassSessionUpdate,
+    current_user=Depends(require_admin_or_staff),
     db: Session = Depends(get_db),
 ):
     return scheduling_service.update_class_session(
         session_id,
         session_data,
         db,
+        current_user=current_user,
     )
 
 
@@ -239,6 +275,7 @@ def update_class_session(
 def delete_class_session(
     session_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin),
 ):
     return scheduling_service.delete_class_session(
         session_id,

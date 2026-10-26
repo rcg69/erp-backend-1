@@ -15,7 +15,13 @@ from schemas.attendance_schema import (
     TeacherAttendanceBulkCreate,
     TeacherClassSessionsResponse,
 )
-from security.auth import require_admin, require_staff
+from security.auth import (
+    require_admin,
+    require_admin_or_staff,
+    require_admin_staff_or_student,
+    require_staff,
+    require_student,
+)
 from services import attendance_service
 
 
@@ -48,9 +54,10 @@ def get_attendance(
         min_length=1,
         max_length=20,
     ),
+    current_user=Depends(require_admin_staff_or_student),
     db: Session = Depends(get_db),
 ):
-    return attendance_service.get_attendance(db, academic_year)
+    return attendance_service.get_attendance(db, academic_year, current_user)
 
 
 @router.get(
@@ -63,6 +70,7 @@ def get_class_roster(
     session_date: date = Query(...),
     session_id: int | None = Query(default=None),
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return attendance_service.get_class_roster(
         grade_id, section_id, session_date, session_id, db
@@ -83,9 +91,24 @@ def get_student_attendance_report(
         max_length=20,
     ),
     db: Session = Depends(get_db),
+    current_user=Depends(require_admin_staff_or_student),
 ):
     return attendance_service.get_student_attendance_report(
-        roll_number, grade_id, section_id, academic_year, db
+        roll_number, grade_id, section_id, academic_year, db, current_user
+    )
+
+
+@router.get(
+    "/me",
+    response_model=StudentAttendanceReport,
+)
+def get_my_attendance_report(
+    academic_year: str | None = Query(default=None, min_length=1, max_length=20),
+    current_user=Depends(require_student),
+    db: Session = Depends(get_db),
+):
+    return attendance_service.get_my_attendance_report(
+        current_user["person_id"], academic_year, db
     )
 
 
@@ -150,6 +173,7 @@ def create_bulk_attendance(
 def get_attendance_record(
     attendance_id: int,
     db: Session = Depends(get_db),
+    _current_user=Depends(require_admin_or_staff),
 ):
     return attendance_service.get_one_attendance(attendance_id, db)
 
