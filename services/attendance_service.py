@@ -166,6 +166,8 @@ def get_attendance(
             if current_user and current_user.get("role") == "student"
             else None
         )
+        if student_id is None:
+            return model.get_all_attendance(db, academic_year)
         return model.get_all_attendance(db, academic_year, student_id)
     except SQLAlchemyError as exc:
         _raise_database_error(exc, "listing")

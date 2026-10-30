@@ -6,6 +6,8 @@ from database import get_db
 from schemas.auth_schema import (
     LoginRequest,
     LoginResponse,
+    PasswordResetConfirmRequest,
+    PasswordResetRequest,
     RefreshResponse,
 )
 
@@ -14,6 +16,7 @@ from schemas.user_schema import UserResponse
 from security.auth import get_current_user
 
 from services import auth_service
+from services import password_reset_service
 
 
 router = APIRouter(
@@ -45,6 +48,24 @@ def login(
         credentials,
         response,
         db
+    )
+
+
+@router.post("/password-reset/request")
+def request_password_reset(
+    request: PasswordResetRequest,
+    db: Session = Depends(get_db),
+):
+    return password_reset_service.request_password_reset(str(request.email), db)
+
+
+@router.post("/password-reset/confirm")
+def confirm_password_reset(
+    request: PasswordResetConfirmRequest,
+    db: Session = Depends(get_db),
+):
+    return password_reset_service.confirm_password_reset(
+        request.token, request.new_password, db
     )
 
 
