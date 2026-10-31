@@ -2,6 +2,7 @@ import os
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 
@@ -14,8 +15,20 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL is not configured")
 
 
+def normalize_database_url(database_url: str):
+    """Require TLS for Render's public PostgreSQL endpoint."""
+    url = make_url(database_url)
+    host = (url.host or "").lower()
+    if host.endswith("postgres.render.com"):
+        query = dict(url.query)
+        if query.get("sslmode", "").lower() in {"", "disable"}:
+            query["sslmode"] = "require"
+            url = url.set(query=query)
+    return url
+
+
 engine = create_engine(
-    DATABASE_URL,
+    normalize_database_url(DATABASE_URL),
     pool_pre_ping=True,
 )
 
